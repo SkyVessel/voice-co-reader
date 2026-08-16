@@ -13,7 +13,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.core.events import EventBus
-from src.core.provider import QwenRealtimeProvider
+from src.core.provider import create_provider
 from src.core.session import VoiceSession
 from src.core.tools import ToolContext, ToolRegistry, load_tools_from_dir
 from src.main.cli import load_env, render
@@ -21,8 +21,9 @@ from src.main.cli import load_env, render
 
 async def main():
     load_env()
-    key = os.environ["DASHSCOPE_API_KEY"]
-    model = os.environ.get("VOICE_MODEL", "qwen-audio-3.0-realtime-plus")
+    provider_name = os.environ.get("VOICE_PROVIDER", "qwen")
+    key_env = {"qwen": "DASHSCOPE_API_KEY", "openai": "OPENAI_API_KEY"}.get(provider_name)
+    key = os.environ[key_env]
     question = sys.argv[1] if len(sys.argv) > 1 else "现在几点了？今天星期几？"
 
     bus = EventBus()
@@ -31,7 +32,9 @@ async def main():
     load_tools_from_dir(registry, "src/tools")
     print(f"已加载工具: {registry.names()}")
 
-    provider = QwenRealtimeProvider(api_key=key, model=model)
+    provider = create_provider(provider_name, key, os.environ.get("VOICE_MODEL", ""),
+                               ws_base=os.environ.get("OPENAI_WS_BASE", ""))
+    print(f"provider={provider_name} model={provider.model}")
     # push-to-talk 模式：手动注入文本 + 触发推理，不走 VAD
     session = VoiceSession(provider, bus, tools=registry, use_mic=False,
                            config={"turn_detection": None})

@@ -89,7 +89,8 @@ async def amain():
 
     _, _, initial_skills = load_all()
 
-    provider = create_provider(provider_name, api_key, os.environ.get("VOICE_MODEL", ""))
+    provider = create_provider(provider_name, api_key, os.environ.get("VOICE_MODEL", ""),
+                               ws_base=os.environ.get("OPENAI_WS_BASE", ""))
     # 各家音色名不同；不配置时用 Provider 内建默认
     config = {}
     if os.environ.get("VOICE_NAME"):

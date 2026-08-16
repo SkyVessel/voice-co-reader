@@ -159,7 +159,11 @@ _OA_EVENT_MAP = {
     "conversation.item.input_audio_transcription.delta": "user.transcript_delta",
     "conversation.item.input_audio_transcription.completed": "user.transcript_done",
     "response.created": "response.created",
+    # 事件名两族并存：经典扁平 schema（GA 2025，中转站透传）用 response.audio.*，
+    # 统一接口（2026 新）用 response.output_audio.* —— 都映射到同一内部事件
+    "response.audio.delta": "assistant.audio_delta",
     "response.output_audio.delta": "assistant.audio_delta",
+    "response.audio_transcript.delta": "assistant.transcript_delta",
     "response.output_audio_transcript.delta": "assistant.transcript_delta",
     "response.done": "response.done",
     "error": "error",
@@ -200,30 +204,31 @@ class OpenAIRealtimeProvider(RealtimeProvider):
         await self._ws.send(json.dumps(payload))
 
     async def update_session(self, config: dict[str, Any]) -> None:
-        """把通用 config 翻译成 OpenAI GA session 结构。"""
-        audio_in: dict[str, Any] = {
-            "format": {"type": "audio/pcm", "rate": 24000},
-            # 用户语音转写模型名若失效，session.update 会报错——届时查官方文档换新名
-            "transcription": {"model": "gpt-4o-mini-transcribe"},
-        }
-        td = config.get("turn_detection")
-        if td is not None:
-            audio_in["turn_detection"] = td  # server_vad 参数名与 Qwen 一致
+        """把通用 config 翻译成 OpenAI 扁平 GA session 结构。
+        实测（2026-08，经 CometAPI 中转 gpt-realtime-2.1-mini）：统一接口的嵌套结构
+        （session.type=realtime + audio.input/output）会被拒绝 unknown_parameter，
+        经典扁平 schema 可用。"""
         voice = config.get("voice", "alloy")
         if voice not in _OA_VOICES:
             voice = "alloy"
         session: dict[str, Any] = {
-            "type": "realtime",
+            "modalities": ["audio", "text"],
             "instructions": config.get("instructions", ""),
-            "output_modalities": ["audio"],
-            "audio": {
-                "input": audio_in,
-                "output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": voice},
-            },
+            "voice": voice,
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "input_audio_transcription": {"model": "gpt-4o-mini-transcribe"},
         }
+        td = config.get("turn_detection")
+        if td is not None:
+            session["turn_detection"] = td  # server_vad 参数名与 Qwen 一致
         tools = config.get("tools")
         if tools:
-            session["tools"] = [{"type": "function", **t} for t in tools]
+            # 我们的 schema 是 HTTP 嵌套风格 {type, function:{...}}；Realtime 要扁平的
+            session["tools"] = [
+                {"type": "function", **t["function"]} if "function" in t else {"type": "function", **t}
+                for t in tools
+            ]
         await self._send({"type": "session.update", "session": session})
 
     async def send_audio(self, pcm: bytes) -> None:
@@ -253,7 +258,13 @@ class OpenAIRealtimeProvider(RealtimeProvider):
         async for raw in self._ws:
             msg = json.loads(raw)
             otype = msg.get("type", "")
-            # 工具调用：GA 走 response.output_item.done（item.type == function_call）
+            # 工具调用两族并存：经典 schema 用 response.function_call_arguments.done，
+            # 统一接口用 response.output_item.done（item.type==function_call）
+            if otype == "response.function_call_arguments.done":
+                yield {"type": "tool.call", "raw_type": otype,
+                       "call_id": msg.get("call_id"), "name": msg.get("name"),
+                       "arguments": msg.get("arguments", "{}")}
+                continue
             if otype == "response.output_item.done":
                 item = msg.get("item", {})
                 if item.get("type") == "function_call":
@@ -266,9 +277,10 @@ class OpenAIRealtimeProvider(RealtimeProvider):
                 log.debug("unmapped event: %s", otype)
                 continue
             evt: dict[str, Any] = {"type": mapped, "raw_type": otype}
-            if otype == "response.output_audio.delta":
+            if otype in ("response.audio.delta", "response.output_audio.delta"):
                 evt["pcm"] = base64.b64decode(msg.get("delta", ""))
-            elif otype in ("response.output_audio_transcript.delta",
+            elif otype in ("response.audio_transcript.delta",
+                           "response.output_audio_transcript.delta",
                            "conversation.item.input_audio_transcription.delta"):
                 evt["delta"] = msg.get("delta", "")
                 evt["stash"] = ""
@@ -290,13 +302,15 @@ class OpenAIRealtimeProvider(RealtimeProvider):
 
 
 PROVIDERS = {
-    "qwen": lambda key, model: QwenRealtimeProvider(key, model or "qwen-audio-3.0-realtime-plus"),
-    "openai": lambda key, model: OpenAIRealtimeProvider(key, model or "gpt-realtime-2.1"),
+    "qwen": lambda key, model, ws_base="": QwenRealtimeProvider(key, model or "qwen-audio-3.0-realtime-plus"),
+    "openai": lambda key, model, ws_base="": OpenAIRealtimeProvider(
+        key, model or "gpt-realtime-2.1",
+        **({"ws_base": ws_base} if ws_base else {})),
 }
 
 
-def create_provider(name: str, api_key: str, model: str = "") -> RealtimeProvider:
-    """按名字创建 Provider（Vendor-Neutral 的落地）。"""
+def create_provider(name: str, api_key: str, model: str = "", ws_base: str = "") -> RealtimeProvider:
+    """按名字创建 Provider（Vendor-Neutral 的落地）。ws_base 用于中转站/自建网关。"""
     if name not in PROVIDERS:
         raise ValueError(f"未知 provider: {name}（可选: {list(PROVIDERS)}）")
-    return PROVIDERS[name](api_key, model)
+    return PROVIDERS[name](api_key, model, ws_base)
