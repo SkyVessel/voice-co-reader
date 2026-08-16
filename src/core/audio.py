@@ -95,6 +95,10 @@ class SpeakerPlayback:
 
     def stop(self):
         self._q.put(None)
-        self._thread.join(timeout=1)
-        self._stream.stop()
-        self._stream.close()
+        if self._thread.is_alive() or self._thread.ident is not None:
+            self._thread.join(timeout=1)
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except Exception:
+            pass

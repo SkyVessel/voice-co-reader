@@ -13,7 +13,7 @@ import sys
 
 from src.core.events import Event, EventBus
 from src.core.hooks import Hooks
-from src.core.provider import QwenRealtimeProvider
+from src.core.provider import create_provider
 from src.core.reload import ReloadManager
 from src.core.session import VoiceSession
 from src.core.skills import load_skills
@@ -47,6 +47,10 @@ def render(evt: Event):
         print("AI: ", end="", flush=True)
     elif t == "interrupted":
         print("\n⚡ [已打断]", flush=True)
+    elif t == "mode":
+        print(f"\n🔀 [模式] {'🎙 语音+键盘' if d['mic'] else '⌨️ 仅键盘（麦克风已静音）'}", flush=True)
+    elif t == "user.typed":
+        print(f"你(键盘): {d['text']}", flush=True)
     elif t == "latency.ttfa":
         print(f"\n⏱  首音延迟 TTFA: {d['seconds']}s", flush=True)
     elif t == "response.done":
@@ -107,18 +111,51 @@ async def amain():
 
     reloader = ReloadManager([TOOLS_DIR, SKILLS_DIR], on_change=on_reload)
 
-    print(f"启动中… provider={provider_name} model={provider.model}，直接开口说话，Ctrl+C 退出")
+    print(f"启动中… provider={provider_name} model={provider.model}")
     print(f"工具: {registry.names() or '无'} | 技能: {[s.name for s in session.skills] or '无'}")
-    print(f"（改 {TOOLS_DIR}/*.py 或 {SKILLS_DIR}/*/SKILL.md 会热重载）")
+    print("操作: 开口说话 或 直接打字回车；Shift+Tab 切换 语音/键盘 模式；Ctrl+C 退出")
+
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.patch_stdout import patch_stdout
+
+    kb = KeyBindings()
+
+    @kb.add("s-tab")  # Shift+Tab
+    def _toggle(event):
+        session.mic_enabled = not session.mic_enabled
+        bus.publish("mode", mic=session.mic_enabled)
+
+    ps = PromptSession(key_bindings=kb)
+
+    def toolbar():
+        return "🎙 语音+键盘 | Shift+Tab 切换" if session.mic_enabled \
+            else "⌨️  仅键盘（他听不到你，你能听到他）| Shift+Tab 切换"
+
+    async def keyboard_loop():
+        while True:
+            try:
+                text = await ps.prompt_async("你(键盘)> ", bottom_toolbar=toolbar)
+            except (EOFError, KeyboardInterrupt):
+                break
+            text = text.strip()
+            if not text:
+                continue
+            bus.publish("user.typed", text=text)
+            await provider.inject_text(text)
+            await provider.create_response()
 
     reload_task = asyncio.create_task(reloader.run())
+    session_task = asyncio.create_task(session.run())
     try:
-        await session.run()
+        with patch_stdout():
+            await keyboard_loop()
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
         reloader.stop()
         reload_task.cancel()
+        session_task.cancel()
         await session.close()
 
 

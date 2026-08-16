@@ -50,19 +50,17 @@ async def main():
     await provider.inject_text(question)
     await provider.create_response()
 
-    # 等两轮响应（工具调用轮 + 口述轮）或超时
-    done_count = 0
-    for _ in range(400):
+    # 等收尾：出现"其后没有任何工具调用的 response.done" = 模型开始纯口述了
+    for _ in range(600):
         await asyncio.sleep(0.1)
-        done_count = sum(
-            1 for e in bus.history
-            if e.type == "response.done" and e.data.get("status") in ("completed", "failed")
-        )
-        tool_called = any(e.type == "tool.call" for e in bus.history)
-        if done_count >= (2 if tool_called else 1):
+        hist = bus.history
+        done_idxs = [i for i, e in enumerate(hist)
+                     if e.type == "response.done" and e.data.get("status") in ("completed", "failed")]
+        if done_idxs and not any(e.type == "tool.call" for e in hist[done_idxs[-1]:]):
             break
 
     tool_events = [e for e in bus.history if e.type == "tool.call"]
+    done_count = sum(1 for e in bus.history if e.type == "response.done")
     print(f"\n=== 结果 ===")
     print(f"工具调用: {[e.data.get('name') for e in tool_events] or '未触发'}")
     print(f"响应轮数: {done_count}")

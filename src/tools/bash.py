@@ -5,18 +5,17 @@
 
 import asyncio
 import tempfile
-from pathlib import Path
 
-WORKSPACE = Path(__file__).resolve().parent.parent.parent
+from src.tools._fs import ROOT
+
 MAX_CHARS = 4000
 
 
 def register(registry, ctx):
     @registry.register(
         "bash",
-        "在项目工作区执行 bash 命令，返回 stdout+stderr（截断到末尾 4000 字符）。"
-        "适合查文件、跑脚本、查系统信息。危险命令（删文件、改系统）执行前先跟用户确认。",
-        parameters={
+        "在用户电脑上执行 bash 命令（工作目录为主目录），返回 stdout+stderr（截断到末尾 4000 字符）。"
+        "适合查文件、跑脚本、查系统信息。危险命令（删文件、改系统）执行前先跟用户确认。",        parameters={
             "type": "object",
             "properties": {
                 "command": {"type": "string", "title": "要执行的 bash 命令"},
@@ -31,7 +30,7 @@ def register(registry, ctx):
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            cwd=WORKSPACE,
+            cwd=ROOT,
         )
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)

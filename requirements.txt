@@ -3,3 +3,4 @@ sounddevice>=0.5
 numpy>=2
 ddgs>=9
 trafilatura>=2
+prompt_toolkit>=3

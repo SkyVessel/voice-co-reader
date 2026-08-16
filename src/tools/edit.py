@@ -1,15 +1,6 @@
-"""文件编辑工具（对照 pi 的 edit.ts）：精确文本替换。限定工作区。"""
+"""文件编辑工具（对照 pi 的 edit.ts）：精确文本替换。范围见 _fs.py。"""
 
-from pathlib import Path
-
-WORKSPACE = Path(__file__).resolve().parent.parent.parent
-
-
-def _resolve(path: str) -> Path:
-    p = (WORKSPACE / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
-    if not str(p).startswith(str(WORKSPACE)):
-        raise ValueError(f"路径越界：{path}（只允许工作区内文件）")
-    return p
+from src.tools._fs import ROOT, resolve
 
 
 def register(registry, ctx):
@@ -20,7 +11,7 @@ def register(registry, ctx):
         parameters={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "title": "文件路径（相对项目根目录）"},
+                "path": {"type": "string", "title": "文件路径（相对主目录或绝对路径）"},
                 "old_text": {"type": "string", "title": "要被替换的原文（需唯一匹配）"},
                 "new_text": {"type": "string", "title": "替换后的新文本"},
             },
@@ -28,7 +19,7 @@ def register(registry, ctx):
         },
     )
     async def edit_file(path: str, old_text: str, new_text: str) -> dict:
-        p = _resolve(path)
+        p = resolve(path)
         if not p.is_file():
             return {"error": f"文件不存在：{path}"}
         text = p.read_text(encoding="utf-8")
@@ -38,4 +29,4 @@ def register(registry, ctx):
         if count > 1:
             return {"error": f"old_text 出现 {count} 次，不唯一，未做修改。请提供更长的上下文。"}
         p.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
-        return {"ok": True, "path": str(p.relative_to(WORKSPACE))}
+        return {"ok": True, "path": str(p.relative_to(ROOT))}

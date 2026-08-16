@@ -13,6 +13,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
 
@@ -201,6 +202,9 @@ class OpenAIRealtimeProvider(RealtimeProvider):
         log.info("connected: %s", self.url)
 
     async def _send(self, payload: dict[str, Any]) -> None:
+        if os.environ.get("DEBUG_EVENTS"):
+            with open("/tmp/oa_events.log", "a") as f:
+                f.write(f">> {json.dumps(payload, ensure_ascii=False)[:300]}\n")
         await self._ws.send(json.dumps(payload))
 
     async def update_session(self, config: dict[str, Any]) -> None:
@@ -255,21 +259,33 @@ class OpenAIRealtimeProvider(RealtimeProvider):
         await self._send({"type": "response.create"})
 
     async def events(self) -> AsyncIterator[dict[str, Any]]:
+        seen_tool_calls: set = set()
         async for raw in self._ws:
             msg = json.loads(raw)
+            if os.environ.get("DEBUG_EVENTS"):
+                t = msg.get("type", "")
+                if not t.endswith("audio.delta"):
+                    with open("/tmp/oa_events.log", "a") as f:
+                        f.write(f"<< {json.dumps(msg, ensure_ascii=False)[:300]}\n")
             otype = msg.get("type", "")
             # 工具调用两族并存：经典 schema 用 response.function_call_arguments.done，
-            # 统一接口用 response.output_item.done（item.type==function_call）
+            # 统一接口用 response.output_item.done（item.type==function_call）。
+            # 坑：经典 API 同一调用两种事件都会发——必须按 call_id 去重，只报一次！
             if otype == "response.function_call_arguments.done":
-                yield {"type": "tool.call", "raw_type": otype,
-                       "call_id": msg.get("call_id"), "name": msg.get("name"),
-                       "arguments": msg.get("arguments", "{}")}
+                cid = msg.get("call_id")
+                if cid not in seen_tool_calls:
+                    seen_tool_calls.add(cid)
+                    yield {"type": "tool.call", "raw_type": otype,
+                           "call_id": cid, "name": msg.get("name"),
+                           "arguments": msg.get("arguments", "{}")}
                 continue
             if otype == "response.output_item.done":
                 item = msg.get("item", {})
-                if item.get("type") == "function_call":
+                cid = item.get("call_id")
+                if item.get("type") == "function_call" and cid not in seen_tool_calls:
+                    seen_tool_calls.add(cid)
                     yield {"type": "tool.call", "raw_type": otype,
-                           "call_id": item.get("call_id"), "name": item.get("name"),
+                           "call_id": cid, "name": item.get("name"),
                            "arguments": item.get("arguments", "{}")}
                 continue
             mapped = _OA_EVENT_MAP.get(otype)

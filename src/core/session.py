@@ -56,7 +56,9 @@ class VoiceSession:
         self.mic: MicCapture | None = None
         self.speaker = SpeakerPlayback()
         self._session_started = False
-        self._pending_response_create = False  # 工具结果已写回、等 response.done 后触发二轮推理
+        self._pending_tool_results: list[tuple[str, str]] = []  # (call_id, result) 待写回
+        self._response_active = False          # response.created/done 之间为 True
+        self.mic_enabled = True                # False = 键盘模式（丢弃麦克帧）
 
     def _instructions(self) -> str:
         return BASE_INSTRUCTIONS + format_for_instructions(self.skills)
@@ -111,7 +113,8 @@ class VoiceSession:
     async def _uplink(self):
         while True:
             pcm = await self.mic.frames.get()
-            await self.provider.send_audio(pcm)
+            if self.mic_enabled:  # 键盘模式下丢弃麦克帧（AI 听不到你）
+                await self.provider.send_audio(pcm)
 
     async def _downlink(self):
         try:
@@ -159,24 +162,30 @@ class VoiceSession:
             self.bus.publish("assistant.transcript_delta", delta=evt.get("delta", ""))
 
         elif t == "tool.call":
-            # Function Calling：执行 → 写回 → 等 response.done 后触发二轮推理
+            # Function Calling：执行 → 结果暂存 → 等 response.done 后统一写回+触发二轮
+            # （实测：OpenAI 经典 API 经中转网关时，响应进行中写 item 会被静默吞掉，
+            #  全部推到 done 后写是唯一稳定顺序，对 Qwen 同样合法）
             name, args = evt["name"], evt.get("arguments", "{}")
             await self.hooks.emit("on_tool_call", name=name, arguments=args)
             self.bus.publish("tool.call", name=name)
             result = await self.tools.dispatch(name, args)
             await self.hooks.emit("on_tool_result", name=name, result=result)
             self.bus.publish("tool.result", name=name, result=result)
-            await self.provider.write_tool_result(evt["call_id"], result)
-            self._pending_response_create = True
+            self._pending_tool_results.append((evt["call_id"], result))
+
+        elif t == "response.created":
+            self._response_active = True
+            self.bus.publish("response.created")
 
         elif t == "response.done":
+            self._response_active = False
             status = evt.get("status")
             self.bus.publish("response.done", status=status, reason=evt.get("reason"))
             await self.hooks.emit("on_turn_end", status=status)
             self._set_state(State.IDLE)
-            if self._pending_response_create:
-                self._pending_response_create = False
-                await self.provider.create_response()
+            if self._pending_tool_results:
+                pending, self._pending_tool_results = self._pending_tool_results, []
+                asyncio.create_task(self._flush_tool_results(pending))
 
         elif t == "error":
             self.bus.publish("error", error=evt.get("error"))
@@ -192,6 +201,20 @@ class VoiceSession:
                              mic=round(self.mic.level, 3) if self.mic else 0.0,
                              speaker=round(self.speaker.level, 3))
 
+    async def _flush_tool_results(self, pending: list[tuple[str, str]]):
+        """response.done 后：统一写回工具结果 → 触发二轮推理（带确认重试）。
+        背景：中转网关（实测 CometAPI/new-api）会静默丢消息，重试对官方 API 无害。"""
+        for call_id, result in pending:
+            print(f"[flush] 写回 {call_id[-6:]} ({len(result)} 字符)", flush=True)
+            await self.provider.write_tool_result(call_id, result)
+        for attempt in range(3):
+            await self.provider.create_response()
+            for _ in range(30):  # 等 3s 看 response.created 是否回来
+                if self._response_active:
+                    return
+                await asyncio.sleep(0.1)
+            log.warning("response.create 未确认，重试 %d/3", attempt + 2)
+        self.bus.publish("error", error={"type": "response_create_lost"})
     async def close(self):
         if self.mic:
             self.mic.stop()
