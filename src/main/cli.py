@@ -62,21 +62,24 @@ def render(evt: Event):
         print(f"\n❌ {d.get('error')}", flush=True)
     elif t == "session.created":
         s = d.get("session", {})
-        print(f"已连接: {s.get('model')} (voice={s.get('voice')})", flush=True)
+        if isinstance(s, dict):
+            voice = (s.get("audio") or {}).get("output", {}).get("voice") or s.get("voice", "?")
+            print(f"已连接: {s.get('model', '?')} (voice={voice})", flush=True)
 
 
 async def amain():
     load_env()
-    api_key = os.environ.get("DASHSCOPE_API_KEY")
+    # Provider 选择：.env 里 VOICE_PROVIDER=qwen|openai，key 分别取 DASHSCOPE_API_KEY / OPENAI_API_KEY
+    provider_name = os.environ.get("VOICE_PROVIDER", "qwen")
+    key_env = {"qwen": "DASHSCOPE_API_KEY", "openai": "OPENAI_API_KEY"}.get(provider_name)
+    api_key = os.environ.get(key_env or "")
     if not api_key:
-        sys.exit("缺少 DASHSCOPE_API_KEY（写入 .env 或环境变量）")
+        sys.exit(f"缺少 {key_env}（写入 .env 或环境变量）")
 
-    model = os.environ.get("VOICE_MODEL", "qwen-audio-3.0-realtime-plus")
     bus = EventBus()
     bus.subscribe(render)
     hooks = Hooks()
     registry = ToolRegistry(ToolContext(bus))
-    session.skills = skills
 
     def load_all():
         registry.clear()
@@ -84,7 +87,15 @@ async def amain():
         skill_list = load_skills(SKILLS_DIR)
         return registry.names(), [s.name for s in skill_list], skill_list
 
-    load_all()
+    _, _, initial_skills = load_all()
+
+    provider = create_provider(provider_name, api_key, os.environ.get("VOICE_MODEL", ""))
+    # 各家音色名不同；不配置时用 Provider 内建默认
+    config = {}
+    if os.environ.get("VOICE_NAME"):
+        config["voice"] = os.environ["VOICE_NAME"]
+    session = VoiceSession(provider, bus, tools=registry, hooks=hooks,
+                           skills=initial_skills, config=config)
 
     async def on_reload():
         names, skill_names, skill_list = load_all()
@@ -95,7 +106,7 @@ async def amain():
 
     reloader = ReloadManager([TOOLS_DIR, SKILLS_DIR], on_change=on_reload)
 
-    print(f"启动中… 模型={model}，直接开口说话，Ctrl+C 退出")
+    print(f"启动中… provider={provider_name} model={provider.model}，直接开口说话，Ctrl+C 退出")
     print(f"工具: {registry.names() or '无'} | 技能: {[s.name for s in session.skills] or '无'}")
     print(f"（改 {TOOLS_DIR}/*.py 或 {SKILLS_DIR}/*/SKILL.md 会热重载）")
 
