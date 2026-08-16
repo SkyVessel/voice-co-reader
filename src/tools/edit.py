@@ -1,0 +1,41 @@
+"""文件编辑工具（对照 pi 的 edit.ts）：精确文本替换。限定工作区。"""
+
+from pathlib import Path
+
+WORKSPACE = Path(__file__).resolve().parent.parent.parent
+
+
+def _resolve(path: str) -> Path:
+    p = (WORKSPACE / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
+    if not str(p).startswith(str(WORKSPACE)):
+        raise ValueError(f"路径越界：{path}（只允许工作区内文件）")
+    return p
+
+
+def register(registry, ctx):
+    @registry.register(
+        "edit_file",
+        "对文件做精确文本替换：把 old_text 替换为 new_text。"
+        "old_text 必须在文件中唯一出现。适合小改动；大改用 write_file。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "title": "文件路径（相对项目根目录）"},
+                "old_text": {"type": "string", "title": "要被替换的原文（需唯一匹配）"},
+                "new_text": {"type": "string", "title": "替换后的新文本"},
+            },
+            "required": ["path", "old_text", "new_text"],
+        },
+    )
+    async def edit_file(path: str, old_text: str, new_text: str) -> dict:
+        p = _resolve(path)
+        if not p.is_file():
+            return {"error": f"文件不存在：{path}"}
+        text = p.read_text(encoding="utf-8")
+        count = text.count(old_text)
+        if count == 0:
+            return {"error": "old_text 未找到，未做修改"}
+        if count > 1:
+            return {"error": f"old_text 出现 {count} 次，不唯一，未做修改。请提供更长的上下文。"}
+        p.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
+        return {"ok": True, "path": str(p.relative_to(WORKSPACE))}
