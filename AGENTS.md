@@ -69,6 +69,6 @@
 ## 给编码 Agent 的工作指引
 
 - 修改实时协议相关代码前，先读 `docs/` 中的 Qwen Audio Realtime 协议笔记；不确定的事件/字段名要查官方文档（阿里云百炼 → Qwen-Audio Realtime API 参考），不要凭记忆编造。
-- 新增工具 = 在 `src/core/tools/` 注册 + 给出语音友好的描述文案；新增技能 = 在 `src/skills/<name>/` 建目录并写 `SKILL.md`。
+- 新增工具 = 在 `src/tools/` 建 `.py` 文件（模块提供 `register(registry, ctx)`，用 `@registry.register` 装饰器，描述文案要语音友好）；新增技能 = 在 `src/skills/<name>/` 建目录写 `SKILL.md`（带 frontmatter）。两者改动都会**热重载**（reload.py 监视，1s 轮询 + session.update 刷新），不用重启会话。
 - 保持内核无业务逻辑：知识问答、调研流程属于技能/扩展，不进入 `core/`。
 - 每次改动后运行 `python -m pytest`（若已建立测试）并做一次冒烟对话验证打断与工具调用链路。

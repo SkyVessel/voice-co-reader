@@ -53,7 +53,7 @@ class RealtimeProvider(ABC):
     async def send_audio(self, pcm: bytes) -> None: ...
 
     @abstractmethod
-    async def send_tool_result(self, call_id: str, output: str) -> None: ...
+    async def write_tool_result(self, call_id: str, output: str) -> None: ...
 
     @abstractmethod
     async def events(self) -> AsyncIterator[dict[str, Any]]:
@@ -90,13 +90,13 @@ class QwenRealtimeProvider(RealtimeProvider):
             "audio": base64.b64encode(pcm).decode(),
         })
 
-    async def send_tool_result(self, call_id: str, output: str) -> None:
-        """写回工具结果并触发二轮推理（Function Calling 标准流程）。"""
+    async def write_tool_result(self, call_id: str, output: str) -> None:
+        """写回工具结果。注意：之后不能立刻 response.create，
+        要等当前 response.done（协议：推理进行中不允许 create）。"""
         await self._send({
             "type": "conversation.item.create",
             "item": {"type": "function_call_output", "call_id": call_id, "output": output},
         })
-        await self._send({"type": "response.create"})
 
     async def inject_text(self, text: str, role: str = "user") -> None:
         """注入文本消息（文本降级模式 / 冒烟测试用）。"""

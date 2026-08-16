@@ -71,7 +71,11 @@ class SpeakerPlayback:
             if chunk is None:  # 停止信号
                 break
             self.level = rms(chunk)
-            self._stream.write(chunk)
+            try:
+                self._stream.write(chunk)
+            except Exception as e:  # 关闭竞态/设备抖动不致命
+                log.warning("playback write failed: %s", e)
+                break
 
     def start(self):
         self._stream.start()
@@ -91,5 +95,6 @@ class SpeakerPlayback:
 
     def stop(self):
         self._q.put(None)
+        self._thread.join(timeout=1)
         self._stream.stop()
         self._stream.close()
