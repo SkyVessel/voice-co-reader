@@ -56,8 +56,12 @@ async def main():
         hist = bus.history
         done_idxs = [i for i, e in enumerate(hist)
                      if e.type == "response.done" and e.data.get("status") in ("completed", "failed")]
-        if done_idxs and not any(e.type == "tool.call" for e in hist[done_idxs[-1]:]):
-            break
+        if done_idxs:
+            last = done_idxs[-1]
+            prev = done_idxs[-2] if len(done_idxs) > 1 else -1
+            # 本轮（上一个 done 到这个 done 之间）没有工具调用 = 纯口述收尾轮
+            if not any(e.type == "tool.call" for e in hist[prev + 1:last]):
+                break
 
     tool_events = [e for e in bus.history if e.type == "tool.call"]
     done_count = sum(1 for e in bus.history if e.type == "response.done")

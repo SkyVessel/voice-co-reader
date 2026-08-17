@@ -80,6 +80,9 @@ class QwenRealtimeProvider(RealtimeProvider):
         log.info("connected: %s", self.url)
 
     async def _send(self, payload: dict[str, Any]) -> None:
+        if self._ws is None or self._ws.state.name != "OPEN":
+            raise ConnectionError(
+                f"WebSocket 未连接或已断开 (state={self._ws.state.name if self._ws is not None else None})")
         await self._ws.send(json.dumps(payload))
 
     async def update_session(self, config: dict[str, Any]) -> None:
@@ -202,6 +205,9 @@ class OpenAIRealtimeProvider(RealtimeProvider):
         log.info("connected: %s", self.url)
 
     async def _send(self, payload: dict[str, Any]) -> None:
+        if self._ws is None or self._ws.state.name != "OPEN":
+            raise ConnectionError(
+                f"WebSocket 未连接或已断开 (state={self._ws.state.name if self._ws is not None else None})")
         if os.environ.get("DEBUG_EVENTS"):
             with open("/tmp/oa_events.log", "a") as f:
                 f.write(f">> {json.dumps(payload, ensure_ascii=False)[:300]}\n")

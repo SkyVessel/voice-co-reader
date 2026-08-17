@@ -70,15 +70,41 @@ class VoiceSession:
 
     async def run(self):
         loop = asyncio.get_running_loop()
-        await self.provider.connect()
-        await self.refresh()
-        self._session_started = True
-
         self.speaker.start()
-        tasks = [self._downlink(), self._levels()]
+        tasks = [self._run_connection(), self._levels()]
         if self.use_mic:
             tasks.append(self._start_mic_safely(loop))
         await asyncio.gather(*tasks)
+
+    async def _run_connection(self):
+        """连接监督循环：断线（服务器掐断/网络抖动/中转漂移）后指数退避自动重连。
+        重连后重发完整 session 配置；对话上下文随旧会话丢失（realtime 无 resume）。"""
+        delay = 2
+        first = True
+        while True:
+            try:
+                await self.provider.connect()
+                self._session_started = False   # 新连接必须重发完整配置（voice/turn_detection）
+                await self.refresh()
+                self._session_started = True
+                delay = 2
+                if first:
+                    first = False
+                else:
+                    self.bus.publish("reconnected")
+                await self._downlink()  # 正常返回 = 连接已断
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self.bus.publish("error", error={"type": "connect_failed", "message": str(e)})
+            # 落点：连接已死。清理跨会话无效的状态
+            self._pending_tool_results.clear()
+            self._response_active = False
+            self._set_state(State.IDLE)
+            self.bus.publish("error", error={"type": "reconnecting",
+                                             "message": f"{delay}s 后自动重连…"})
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
 
     async def refresh(self):
         """热刷新会话配置：tools + instructions（reload 的落点）。"""
@@ -110,11 +136,13 @@ class VoiceSession:
             return
         await self._uplink()
 
-    async def _uplink(self):
         while True:
             pcm = await self.mic.frames.get()
             if self.mic_enabled:  # 键盘模式下丢弃麦克帧（AI 听不到你）
-                await self.provider.send_audio(pcm)
+                try:
+                    await self.provider.send_audio(pcm)
+                except (ConnectionError, OSError):
+                    pass  # 断线期丢帧，重连后自动恢复
 
     async def _downlink(self):
         try:
@@ -122,9 +150,12 @@ class VoiceSession:
                 await self._handle(evt)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            log.exception("downlink ended with error")  # M1 不重连，直接暴露
-            self.bus.publish("error", error={"type": "connection_lost"})
+        except Exception as e:
+            log.exception("downlink ended with error")
+            self.bus.publish("error", error={"type": "connection_lost", "message": str(e)})
+        else:
+            log.warning("downlink returned WITHOUT exception, ws state=%s",
+                        self.provider._ws.state.name if self.provider._ws else None)
 
     async def _handle(self, evt: dict):
         t = evt["type"]
@@ -204,17 +235,21 @@ class VoiceSession:
     async def _flush_tool_results(self, pending: list[tuple[str, str]]):
         """response.done 后：统一写回工具结果 → 触发二轮推理（带确认重试）。
         背景：中转网关（实测 CometAPI/new-api）会静默丢消息，重试对官方 API 无害。"""
-        for call_id, result in pending:
-            print(f"[flush] 写回 {call_id[-6:]} ({len(result)} 字符)", flush=True)
-            await self.provider.write_tool_result(call_id, result)
-        for attempt in range(3):
-            await self.provider.create_response()
-            for _ in range(30):  # 等 3s 看 response.created 是否回来
-                if self._response_active:
-                    return
-                await asyncio.sleep(0.1)
-            log.warning("response.create 未确认，重试 %d/3", attempt + 2)
-        self.bus.publish("error", error={"type": "response_create_lost"})
+        try:
+            for call_id, result in pending:
+                print(f"[flush] 写回 {call_id[-6:]} ({len(result)} 字符)", flush=True)
+                await self.provider.write_tool_result(call_id, result)
+            for attempt in range(3):
+                await self.provider.create_response()
+                for _ in range(30):  # 等 3s 看 response.created 是否回来
+                    if self._response_active:
+                        return
+                    await asyncio.sleep(0.1)
+                log.warning("response.create 未确认，重试 %d/3", attempt + 2)
+            self.bus.publish("error", error={"type": "response_create_lost"})
+        except Exception as e:
+            # 连接已死（如服务器内容审查掐线）：不再往死 socket 上写，交给重连循环
+            self.bus.publish("error", error={"type": "tool_writeback_failed", "message": str(e)})
     async def close(self):
         if self.mic:
             self.mic.stop()

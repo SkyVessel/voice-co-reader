@@ -80,6 +80,8 @@ def render(evt: Event):
     elif t == "response.done":
         if d.get("status") != "completed":
             print(f"\n[响应结束: {d.get('status')} {d.get('reason') or ''}]", flush=True)
+    elif t == "reconnected":
+        print("\n🔁 [已自动重连]（对话上下文已重置，可继续聊）", flush=True)
     elif t == "tool.call":
         print(f"\n🔧 [调用工具: {d.get('name')}]", flush=True)
     elif t == "ui.note":
