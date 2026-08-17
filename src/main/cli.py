@@ -141,7 +141,12 @@ async def amain():
         if old_task:
             old_task.cancel()
         if old_session:
-            await old_session.close()
+            await old_session.close()  # 置 _closed 闸 + 关麦/扬声器/ws
+        if old_task:
+            # 确定性等待旧任务死亡（asyncio.wait 不传播任务的 CancelledError）
+            done, pending = await asyncio.wait({old_task}, timeout=3)
+            if pending:
+                print("⚠️ 旧会话任务未在 3s 内退出（已置关闭闸，不会重连）")
         session = make_session()
         if session is None:
             return

@@ -59,6 +59,7 @@ class VoiceSession:
         self._pending_tool_results: list[tuple[str, str]] = []  # (call_id, result) 待写回
         self._response_active = False          # response.created/done 之间为 True
         self.mic_enabled = True                # False = 键盘模式（丢弃麦克帧）
+        self._closed = False                   # close() 后置真：禁止监督循环重连（防僵尸会话）
 
     def _instructions(self) -> str:
         return BASE_INSTRUCTIONS + format_for_instructions(self.skills)
@@ -82,6 +83,8 @@ class VoiceSession:
         delay = 2
         first = True
         while True:
+            if self._closed:
+                return
             try:
                 await self.provider.connect()
                 self._session_started = False   # 新连接必须重发完整配置（voice/turn_detection）
@@ -97,6 +100,8 @@ class VoiceSession:
                 raise
             except Exception as e:
                 self.bus.publish("error", error={"type": "connect_failed", "message": str(e)})
+            if self._closed:
+                return  # close() 在我们断开期间被调用：不要重连
             # 落点：连接已死。清理跨会话无效的状态
             self._pending_tool_results.clear()
             self._response_active = False
@@ -251,6 +256,7 @@ class VoiceSession:
             # 连接已死（如服务器内容审查掐线）：不再往死 socket 上写，交给重连循环
             self.bus.publish("error", error={"type": "tool_writeback_failed", "message": str(e)})
     async def close(self):
+        self._closed = True  # 先落闸：即使 cancel 竞态漏送，监督循环也不会重连
         if self.mic:
             self.mic.stop()
         self.speaker.stop()
