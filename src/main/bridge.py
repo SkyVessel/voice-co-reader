@@ -191,6 +191,19 @@ class Bridge:
                                                           evt.data.get("arguments", ""))}
         elif t == "tool.result":
             msg = {"type": "tool.done"}
+        elif t == "worker.tool":  # 主力模型的工具动作也上提示行
+            msg = {"type": "tool.hint", "text": "主力 " + tool_hint(evt.data.get("name", ""),
+                                                                  evt.data.get("arguments", ""))}
+        elif t == "tool.hint":  # delegate 直接发的提示
+            msg = {"type": "tool.hint", "text": evt.data.get("text", "")}
+        elif t == "user.typed":  # 键盘消息回显进聊天流
+            msg = {"type": "msg", "role": "user", "text": evt.data.get("text", "")}
+        elif t == "user.transcript_done":  # 语音转写进聊天流
+            msg = {"type": "msg", "role": "user", "text": evt.data.get("transcript", "")}
+        elif t == "assistant.transcript_done":
+            msg = {"type": "msg", "role": "assistant", "text": evt.data.get("transcript", "")}
+        elif t == "ui.worker":  # 主力模型的完整 Markdown 输出
+            msg = {"type": "msg", "role": "worker", "text": evt.data.get("text", "")}
         elif t in ("state", "levels", "mode", "error", "reconnected",
                    "trimmed", "usage", "ui.note", "interrupted"):
             msg = {"type": t, **evt.data}

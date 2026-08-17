@@ -4,38 +4,69 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>导读</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist@5/index.css">
 <style>
   :root { --bg: #0A0A0A; --hint: #555; }
   html, body { margin: 0; height: 100%; background: var(--bg); }
   body {
-    font-family: "Geist", -apple-system, "PingFang SC", sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro", "PingFang SC", "Helvetica Neue", sans-serif;
     -webkit-font-smoothing: antialiased;
   }
 
-  /* 中间：笔记卡片流 */
-  #notes {
-    position: fixed; inset: 0; bottom: 120px;
-    display: flex; flex-direction: column; align-items: center;
-    overflow-y: auto; padding: 48px 24px 24px;
+  /* 聊天流：单栏文档式，无头像无身份标识 */
+  #chat {
+    position: fixed; inset: 0; bottom: 108px;
+    overflow-y: auto; padding: 40px 24px 12px;
     scrollbar-width: none;
   }
-  #notes::-webkit-scrollbar { display: none; }
-  #notes .col { width: min(52ch, 86vw); display: flex; flex-direction: column; gap: 18px; }
-  .note {
-    border-left: 2px solid #2E2E2E; padding-left: 12px;
-    animation: rise .25s ease;
-  }
-  .note .t { font-size: 14px; font-weight: 500; color: #CCC; letter-spacing: .01em; }
-  .note .c { font-size: 13px; color: #777; line-height: 1.55; margin-top: 3px; }
-  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; } }
+  #chat::-webkit-scrollbar { display: none; }
+  #chat .col { width: min(64ch, 88vw); margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
 
-  /* 底部：常态输入行 + 模式标签 */
+  .msg { animation: rise .25s ease; font-size: 15px; line-height: 1.6; }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; } }
+
+  /* 用户：右侧暗底块 */
+  .msg.user {
+    align-self: flex-end; max-width: 80%;
+    background: #161616; border-radius: 12px; padding: 8px 14px; color: #DDD;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  /* 前台：左侧纯文字 */
+  .msg.assistant { align-self: flex-start; max-width: 92%; color: #DDD; }
+  /* 主力输出：左侧竖线的详细 Markdown 块 */
+  .msg.worker {
+    align-self: flex-start; max-width: 92%;
+    border-left: 2px solid #2A2A2A; padding-left: 14px; color: #AFAFAF; font-size: 14px;
+  }
+  /* 笔记卡片：稍亮的竖线卡 */
+  .msg.note {
+    align-self: flex-start; max-width: 92%;
+    border-left: 2px solid #3D3D3D; padding-left: 14px;
+  }
+  .msg.note .t { font-size: 14px; font-weight: 600; color: #CCC; }
+  .msg.note .c { font-size: 13px; color: #888; line-height: 1.55; margin-top: 3px; white-space: pre-wrap; }
+
+  /* Markdown 元素 */
+  .md p { margin: 0 0 10px; }
+  .md p:last-child { margin-bottom: 0; }
+  .md ul, .md ol { margin: 6px 0 10px; padding-left: 22px; }
+  .md li { margin: 3px 0; }
+  .md h1, .md h2, .md h3 { font-size: 15px; font-weight: 600; color: #DDD; margin: 14px 0 6px; }
+  .md code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px;
+             background: #161616; border-radius: 4px; padding: 1px 5px; }
+  .md pre { background: #111; border-radius: 8px; padding: 10px 12px; overflow-x: auto; }
+  .md pre code { background: none; padding: 0; }
+  .md a { color: #CCC; }
+  .md blockquote { margin: 6px 0; padding-left: 10px; border-left: 2px solid #2A2A2A; color: #999; }
+  .md hr { border: none; border-top: 1px solid #222; margin: 12px 0; }
+  .md table { border-collapse: collapse; font-size: 13px; }
+  .md th, .md td { border: 1px solid #2A2A2A; padding: 4px 10px; }
+
+  /* 底部输入行 */
   #kbd {
-    position: fixed; left: 0; right: 0; bottom: 44px;
+    position: fixed; left: 0; right: 0; bottom: 40px;
     display: flex; justify-content: center;
   }
-  #kbd .row { display: flex; align-items: baseline; gap: 10px; width: min(52ch, 86vw); }
+  #kbd .row { display: flex; align-items: baseline; gap: 10px; width: min(64ch, 88vw); }
   #kbd .prompt { color: #666; font-size: 15px; user-select: none; }
   #kbd input {
     flex: 1; background: none; border: none; outline: none; padding: 0;
@@ -55,7 +86,7 @@
   }
   #hint {
     font-size: 12px; color: var(--hint); letter-spacing: .02em; text-align: right;
-    opacity: 0; transition: opacity .3s ease; min-height: 1.2em;
+    opacity: 0; transition: opacity .3s ease; min-height: 1.2em; max-width: 40vw;
   }
   #hint.on { opacity: 1; }
 </style>
@@ -67,6 +98,7 @@
     "react-dom": "https://esm.sh/react-dom@18.3.1",
     "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
     "orb-ui": "https://esm.sh/orb-ui@0.7?external=react,react-dom",
+    "marked": "https://esm.sh/marked@12.0.2",
     "htm": "https://esm.sh/htm@3.1.1"
   }
 }
@@ -78,6 +110,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Orb } from 'orb-ui'
+import { marked } from 'marked'
 import htm from 'htm'
 
 const html = htm.bind(React.createElement)
@@ -85,18 +118,24 @@ const WS_URL = 'ws://127.0.0.1:8765'
 const ORB_STATES = ['idle', 'connecting', 'listening', 'thinking', 'speaking', 'error']
 // orb-ui 官方音量曲线（gain 4 + 0.8 幂）：原始 RMS 太小不动，整形后才律动
 const shape = (v) => Math.pow(Math.min((v || 0) * 4, 1), 0.8)
+// 先转义原始 HTML 再走 marked：保留 markdown 语法、杜绝注入
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+const md = (src) => marked.parse(esc(src), { breaks: true })
+
+let seq = 0  // 消息自增 key
 
 function App() {
   const [sig, setSig] = useState({ state: 'idle', inputVolume: 0, outputVolume: 0 })
   const [hint, setHint] = useState('')
   const [kbd, setKbd] = useState(false)
   const [lit, setLit] = useState(false)
-  const [notes, setNotes] = useState([])
+  const [msgs, setMsgs] = useState([])
   const wsRef = useRef(null)
   const hintTimer = useRef(null)
   const litTimer = useRef(null)
-  const inputRef = useRef(null)
-  const notesRef = useRef(null)
+  const chatRef = useRef(null)
+
+  const push = (m) => setMsgs(ms => [...ms, { id: ++seq, ...m }])
 
   useEffect(() => {
     let dead = false, retry
@@ -116,7 +155,10 @@ function App() {
           clearTimeout(hintTimer.current)
           hintTimer.current = setTimeout(() => setHint(''), 2000)
         }
-        else if (m.type === 'ui.note') setNotes(ns => [...ns, { title: m.title, content: m.content }])
+        else if (m.type === 'msg') {
+          if (m.text && m.text.trim()) push({ kind: m.role, text: m.text })
+        }
+        else if (m.type === 'ui.note') push({ kind: 'note', title: m.title, text: m.content })
         else if (m.type === 'mode') {
           setKbd(!m.mic)
           setLit(true)
@@ -141,11 +183,11 @@ function App() {
     }
   }, [])
 
-  // 新卡片滚到底部
+  // 新消息滚到底部
   useEffect(() => {
-    const el = notesRef.current
+    const el = chatRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [notes])
+  }, [msgs])
 
   const toggle = () => wsRef.current?.send(JSON.stringify({ type: 'mode.toggle' }))
   const submit = (e) => {
@@ -156,22 +198,25 @@ function App() {
     }
   }
 
+  const renderMsg = (m) => {
+    if (m.kind === 'user')
+      return html`<div key=${m.id} class="msg user">${m.text}</div>`
+    if (m.kind === 'note')
+      return html`<div key=${m.id} class="msg note"><div class="t">${m.title}</div><div class="c">${m.text}</div></div>`
+    // assistant / worker：Markdown 渲染
+    return html`<div key=${m.id} class="msg ${m.kind}"><div class="md"
+      dangerouslySetInnerHTML=${{ __html: md(m.text) }} /></div>`
+  }
+
   const state = ORB_STATES.includes(sig.state) ? sig.state : 'idle'
   return html`
-    <div id="notes" ref=${notesRef}>
-      <div class="col">
-        ${notes.map((n, i) => html`
-          <div class="note" key=${i}>
-            <div class="t">${n.title}</div>
-            <div class="c">${n.content}</div>
-          </div>
-        `)}
-      </div>
+    <div id="chat" ref=${chatRef}>
+      <div class="col">${msgs.map(renderMsg)}</div>
     </div>
     <div id="kbd">
       <div class="row">
         <span class="prompt">›</span>
-        <input ref=${inputRef} placeholder="说点什么…" onKeyDown=${submit} />
+        <input placeholder="说点什么…" onKeyDown=${submit} />
         <span id="modelabel" class=${lit ? 'lit' : ''}>${kbd ? '键盘' : '语音'}</span>
       </div>
     </div>

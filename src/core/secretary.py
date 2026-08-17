@@ -54,6 +54,10 @@ class Secretary:
             text = evt.data.get("transcript", "").strip()
             if text:
                 self._buf.append(f"用户: {text}")
+        elif evt.type == "user.typed":  # 键盘输入也算对话原文
+            text = evt.data.get("text", "").strip()
+            if text:
+                self._buf.append(f"用户: {text}")
         elif evt.type == "assistant.transcript_done":
             text = evt.data.get("transcript", "").strip()
             if text:

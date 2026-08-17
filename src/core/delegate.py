@@ -81,11 +81,14 @@ class Delegate:
                 question=question,
                 extra=f"\n【前台补充背景】{context}" if context else "")
             result = await self.worker.chat([{"role": "user", "content": prompt}])
+            # 先上屏（完整 Markdown 原文），再让前台开口讲解——顺序即产品逻辑
+            self.bus.publish("ui.worker", text=result)
             await self._notify_session(
-                f"[深度思考完成] 以下是后台主力模型的结果，请用一两句话向用户口述要点"
-                f"（不要逐字念）：\n{result[:3500]}")
+                "[深度思考完成] 主力模型的详细结果已经显示在用户屏幕上。"
+                "请看着它用一两句话向用户讲解要点（不要逐字念）：\n" + result[:2000])
         except Exception as e:
             log.warning("deep_think 失败: %s", e)
+            self.bus.publish("tool.hint", text="主力模型暂时不可用")
             await self._notify_session(
                 f"[深度思考失败] 后台主力模型暂时不可用（{e}），请向用户说明并用你自己的能力回答。")
 
