@@ -1,17 +1,23 @@
-"""笔记工具：操控工具雏形（M2 实时笔记的胚胎）。
+"""笔记工具：AI 讲到重点时调用 → 事件总线 + 落盘当日笔记文档。
 
-AI 讲到值得记录的重点时调用 → 往事件总线发 ui.note →
-M1.5 CLI 打印出来；M2 起 React UI 渲染成可寻址卡片。
+「协同导读」的沉淀物：notes/YYYY-MM-DD.md 就是会话产出的文档。
+M2 起 React UI 会把 ui.note 渲染成可寻址卡片；落盘文件是长期记忆。
 """
 
+from __future__ import annotations
+
 import time
+from datetime import datetime
+from pathlib import Path
+
+NOTES_DIR = Path("notes")  # 项目内 notes/（裁剪归档也在这里）
 
 
 def register(registry, ctx):
     @registry.register(
         "show_note",
-        "当你讲到一个值得用户记住的重点（结论、定义、关键数据）时调用，"
-        "把它作为笔记展示给用户。content 要精炼，一两句话以内。",
+        "当你讲到一个值得用户记住的重点（结论、定义、关键数据、来源链接）时调用，"
+        "把它作为笔记展示并保存给用户。content 要精炼，一两句话以内；有来源就附上 URL。",
         parameters={
             "type": "object",
             "properties": {
@@ -23,4 +29,8 @@ def register(registry, ctx):
     )
     async def show_note(title: str, content: str, ctx) -> dict:
         ctx.bus.publish("ui.note", title=title, content=content, ts=time.time())
-        return {"ok": True, "note": title}
+        NOTES_DIR.mkdir(parents=True, exist_ok=True)
+        path = NOTES_DIR / f"{datetime.now():%Y-%m-%d}.md"
+        with path.open("a", encoding="utf-8") as f:
+            f.write(f"- [{datetime.now():%H:%M}] **{title}** {content}\n")
+        return {"ok": True, "note": title, "saved_to": str(path)}
