@@ -1,8 +1,8 @@
-"""M2 WebSocket 桥：把事件总线广播给浏览器 UI，接收浏览器的文本/模式切换。
+"""M2 WebSocket 桥：把事件总线广播给浏览器 UI，接收浏览器的文本/指令/模式切换。
 
 音频仍走 Python 本机（MicCapture/SpeakerPlayback），浏览器只是渲染层（共享桌面）。
 启动：.venv/bin/python -u -m src.main.bridge   然后打开 ui/index.html
-（/model /voice 等管理操作仍在 CLI 里做，桥只承载对话与展示）
+UI 指令（在 › 输入行里）：/model [编号|关键词]  /voice [音色名]
 """
 
 from __future__ import annotations
@@ -21,13 +21,14 @@ from src.core.reload import ReloadManager
 from src.core.session import VoiceSession
 from src.core.skills import load_skills
 from src.core.tools import ToolContext, ToolRegistry, load_tools_from_dir
-from src.main.cli import load_env
+from src.main.cli import MODELS, VOICES, load_env
 
 log = logging.getLogger("bridge")
 TOOLS_DIR = "src/tools"
 SKILLS_DIR = "src/skills"
 KEY_ENV = {"qwen": "DASHSCOPE_API_KEY", "openai": "OPENAI_API_KEY"}
 WS_HOST, WS_PORT = "127.0.0.1", 8765
+MODEL_TAGS = ["qwen plus", "qwen flash", "gpt 2.1", "gpt mini"]  # 与 MODELS 顺序一致
 
 
 def tool_hint(name: str, arguments: str) -> str:
@@ -58,11 +59,103 @@ def tool_hint(name: str, arguments: str) -> str:
 
 
 class Bridge:
-    def __init__(self, bus: EventBus, session: VoiceSession):
+    def __init__(self, bus: EventBus, registry: ToolRegistry, hooks: Hooks):
         self.bus = bus
-        self.session = session
+        self.registry = registry
+        self.hooks = hooks
         self.clients: set = set()
+        self.cur = {
+            "provider": os.environ.get("VOICE_PROVIDER", "qwen"),
+            "model": os.environ.get("VOICE_MODEL", "") or None,
+            "voice": {"qwen": "longanqian", "openai": "marin"},
+        }
+        if self.cur["model"] is None:
+            self.cur["model"] = {"qwen": "qwen-audio-3.0-realtime-plus",
+                                 "openai": "gpt-realtime-2.1"}.get(self.cur["provider"], "")
+        self.session: VoiceSession | None = None
+        self.task: asyncio.Task | None = None
         bus.subscribe(self._on_event)
+        bus.subscribe(self._console_log)
+
+    # ── 会话生命周期 ──
+
+    def _make_session(self) -> VoiceSession | None:
+        key = os.environ.get(KEY_ENV.get(self.cur["provider"], ""), "")
+        if not key:
+            log.error("缺少 %s", KEY_ENV.get(self.cur["provider"]))
+            return None
+        provider = create_provider(self.cur["provider"], key, self.cur["model"],
+                                   ws_base=os.environ.get("OPENAI_WS_BASE", ""))
+        return VoiceSession(provider, self.bus, tools=self.registry, hooks=self.hooks,
+                            skills=load_skills(SKILLS_DIR),
+                            config={"voice": self.cur["voice"][self.cur["provider"]]})
+
+    async def start(self):
+        self.session = self._make_session()
+        if self.session:
+            self.task = asyncio.create_task(self.session.run())
+
+    async def restart(self):
+        """换模型/音色的落点：旧会话死透再建新的（与 CLI 同一套双保险）。"""
+        old_task, old_session = self.task, self.session
+        if old_task:
+            old_task.cancel()
+        if old_session:
+            await old_session.close()
+        if old_task:
+            _, pending = await asyncio.wait({old_task}, timeout=3)
+            if pending:
+                log.warning("旧会话任务 3s 未退出（已置关闭闸）")
+        mic_on = old_session.mic_enabled if old_session else True
+        self.session = self._make_session()
+        if self.session is None:
+            return False
+        self.session.mic_enabled = mic_on
+        self.task = asyncio.create_task(self.session.run())
+        return True
+
+    # ── 指令 ──
+
+    async def command(self, text: str) -> str:
+        """/model /voice，返回反馈文案（走 hint 通道显示）。"""
+        parts = text[1:].split()
+        cmd, arg = parts[0].lower(), (parts[1] if len(parts) > 1 else "")
+        if cmd == "model":
+            if not arg:
+                return (f"当前 {self.cur['model']}（可切 "
+                        + " · ".join(f"{i+1} {t}" for i, t in enumerate(MODEL_TAGS)) + "）")
+            idx = None
+            if arg.isdigit() and 1 <= int(arg) <= len(MODELS):
+                idx = int(arg) - 1
+            else:
+                for i, tag in enumerate(MODEL_TAGS):
+                    if arg.lower() in tag:
+                        idx = i
+                        break
+            if idx is None:
+                return f"不认识模型 {arg}"
+            m = MODELS[idx]
+            self.cur["provider"], self.cur["model"] = m["provider"], m["model"]
+            ok = await self.restart()
+            return f"已切换到 {MODEL_TAGS[idx]}" if ok else "切换失败（缺 key）"
+        if cmd == "voice":
+            voices = VOICES[self.cur["provider"]]
+            if not arg:
+                return f"当前音色 {self.cur['voice'][self.cur['provider']]}（可切 " + " ".join(voices) + "）"
+            if arg not in voices:
+                return f"不认识音色 {arg}"
+            self.cur["voice"][self.cur["provider"]] = arg
+            ok = await self.restart()
+            return f"音色换成 {arg}" if ok else "切换失败"
+        return f"未知指令（可用 /model /voice）"
+
+    # ── 事件流转 ──
+
+    def _console_log(self, evt):
+        if evt.type == "error":
+            log.warning("事件 error: %s", evt.data.get("error"))
+        elif evt.type in ("reconnected", "trimmed", "mode"):
+            log.warning("事件 %s: %s", evt.type, evt.data)
 
     def _on_event(self, evt):
         """总线事件 → JSON 广播（同步回调里异步发送）。"""
@@ -91,13 +184,18 @@ class Bridge:
         except Exception:
             self.clients.discard(ws)
 
+    async def _broadcast_hint(self, text: str):
+        payload = json.dumps({"type": "tool.hint", "text": text}, ensure_ascii=False)
+        for ws in list(self.clients):
+            await self._send(ws, payload)
+
     async def handler(self, ws):
         self.clients.add(ws)
-        # 新客户端：同步当前模式与状态
-        await self._send(ws, json.dumps(
-            {"type": "mode", "mic": self.session.mic_enabled}, ensure_ascii=False))
-        await self._send(ws, json.dumps(
-            {"type": "state", "state": self.session.state.value}, ensure_ascii=False))
+        if self.session:
+            await self._send(ws, json.dumps(
+                {"type": "mode", "mic": self.session.mic_enabled}, ensure_ascii=False))
+            await self._send(ws, json.dumps(
+                {"type": "state", "state": self.session.state.value}, ensure_ascii=False))
         try:
             async for raw in ws:
                 try:
@@ -106,6 +204,9 @@ class Bridge:
                     continue
                 if msg.get("type") == "text" and msg.get("text", "").strip():
                     text = msg["text"].strip()
+                    if text.startswith("/"):
+                        await self._broadcast_hint(await self.command(text))
+                        continue
                     self.bus.publish("user.typed", text=text)
                     await self.session.provider.inject_text(text)
                     await self.session.provider.create_response()
@@ -128,23 +229,16 @@ async def amain():
         skill_list = load_skills(SKILLS_DIR)
         return registry.names(), [s.name for s in skill_list], skill_list
 
-    _, _, initial_skills = load_all()
-
-    provider_name = os.environ.get("VOICE_PROVIDER", "qwen")
-    key = os.environ.get(KEY_ENV.get(provider_name, ""), "")
-    if not key:
-        print(f"❌ 缺少 {KEY_ENV.get(provider_name)}")
+    load_all()
+    bridge = Bridge(bus, registry, hooks)
+    await bridge.start()
+    if bridge.session is None:
         return
-    model = os.environ.get("VOICE_MODEL", "") or None
-    provider = create_provider(provider_name, key, model,
-                               ws_base=os.environ.get("OPENAI_WS_BASE", ""))
-    session = VoiceSession(provider, bus, tools=registry, hooks=hooks, skills=initial_skills)
-    bridge = Bridge(bus, session)
 
     async def on_reload():
         names, skill_names, skill_list = load_all()
-        session.skills = skill_list
-        await session.refresh()
+        bridge.session.skills = skill_list
+        await bridge.session.refresh()
         bus.publish("reloaded", tools=names, skills=skill_names)
 
     reloader = ReloadManager([TOOLS_DIR, SKILLS_DIR], on_change=on_reload)
@@ -152,15 +246,33 @@ async def amain():
 
     server = await websockets.serve(bridge.handler, WS_HOST, WS_PORT)
     print(f"✓ WebSocket 桥已启动: ws://{WS_HOST}:{WS_PORT}")
-    print(f"✓ provider={provider_name} model={provider.model}")
+    print(f"✓ provider={bridge.cur['provider']} model={bridge.cur['model']}")
+
+    async def report_devices():
+        """启动诊断：麦克风是否就绪 + 当前输出设备（耳机路由排查用）。"""
+        await asyncio.sleep(6)
+        import sounddevice as sd
+        mic_ok = bridge.session and bridge.session.mic is not None
+        try:
+            out = sd.query_devices(sd.default.device[1])["name"]
+            inp = sd.query_devices(sd.default.device[0])["name"]
+        except Exception:
+            out = inp = "?"
+        print(f"🎙 麦克风: {'就绪' if mic_ok else '⚠️ 不可用'} | 输入: {inp} | 输出: {out}")
+
+    diag_task = asyncio.create_task(report_devices())
     print("→ 打开 ui/index.html 开始对话；Ctrl+C 退出")
 
     try:
-        await asyncio.gather(session.run(), server.wait_closed())
+        await server.wait_closed()
     finally:
         reloader.stop()
         reload_task.cancel()
-        await session.close()
+        diag_task.cancel()
+        if bridge.task:
+            bridge.task.cancel()
+        if bridge.session:
+            await bridge.session.close()
 
 
 def main():

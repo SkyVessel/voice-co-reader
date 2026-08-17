@@ -57,6 +57,8 @@ import htm from 'htm'
 const html = htm.bind(React.createElement)
 const WS_URL = 'ws://127.0.0.1:8765'
 const ORB_STATES = ['idle', 'connecting', 'listening', 'thinking', 'speaking', 'error']
+// orb-ui 官方音量曲线（gain 4 + 0.8 幂）：原始 RMS 太小不动，整形后才律动
+const shape = (v) => Math.pow(Math.min((v || 0) * 4, 1), 0.8)
 
 function App() {
   const [sig, setSig] = useState({ state: 'idle', inputVolume: 0, outputVolume: 0 })
@@ -74,8 +76,12 @@ function App() {
       ws.onmessage = (e) => {
         const m = JSON.parse(e.data)
         if (m.type === 'state') setSig(s => ({ ...s, state: m.state }))
-        else if (m.type === 'levels') setSig(s => ({ ...s, inputVolume: m.mic, outputVolume: m.speaker }))
-        else if (m.type === 'tool.hint') { setHint(m.text); clearTimeout(hintTimer.current) }
+        else if (m.type === 'levels') setSig(s => ({ ...s, inputVolume: shape(m.mic), outputVolume: shape(m.speaker) }))
+        else if (m.type === 'tool.hint') {
+          setHint(m.text)
+          clearTimeout(hintTimer.current)
+          hintTimer.current = setTimeout(() => setHint(''), 6000)  // 兜底自消
+        }
         else if (m.type === 'tool.done') {
           clearTimeout(hintTimer.current)
           hintTimer.current = setTimeout(() => setHint(''), 2000)

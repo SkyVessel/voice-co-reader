@@ -63,11 +63,16 @@ class SpeakerPlayback:
         self._q: queue.Queue[bytes | None] = queue.Queue()
         self.level = 0.0
         self._stream = sd.RawOutputStream(samplerate=SPEAKER_RATE, channels=1, dtype="int16")
+        self._device: int | None = None  # 当前流绑定的系统默认输出设备号
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def _run(self):
         while True:
-            chunk = self._q.get()
+            try:
+                chunk = self._q.get(timeout=0.5)
+            except queue.Empty:
+                self._follow_device()  # 空闲时检查系统默认输出是否变了
+                continue
             if chunk is None:  # 停止信号
                 break
             self.level = rms(chunk)
@@ -76,6 +81,31 @@ class SpeakerPlayback:
             except Exception as e:  # 关闭竞态/设备抖动不致命
                 log.warning("playback write failed: %s", e)
                 break
+
+    def _follow_device(self):
+        """插拔耳机后系统默认输出会变 → 重建流跟随（在播放线程内执行，无竞态）。"""
+        try:
+            cur = sd.default.device[1]
+        except Exception:
+            return
+        if self._device is None:
+            self._device = cur
+            return
+        if cur != self._device:
+            try:
+                old_name = sd.query_devices(self._device)["name"]
+                new_name = sd.query_devices(cur)["name"]
+            except Exception:
+                old_name, new_name = str(self._device), str(cur)
+            log.warning("输出设备切换: %s → %s", old_name, new_name)
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = sd.RawOutputStream(samplerate=SPEAKER_RATE, channels=1, dtype="int16")
+            self._stream.start()
+            self._device = cur
 
     def start(self):
         self._stream.start()
