@@ -9,29 +9,55 @@
   :root { --bg: #0A0A0A; --hint: #555; }
   html, body { margin: 0; height: 100%; background: var(--bg); }
   body {
-    display: flex; align-items: center; justify-content: center;
     font-family: "Geist", -apple-system, "PingFang SC", sans-serif;
     -webkit-font-smoothing: antialiased;
   }
-  #stage { display: flex; flex-direction: column; align-items: center; gap: 28px; }
-  #hint {
-    font-size: 13px; color: var(--hint); letter-spacing: .02em;
-    opacity: 0; transition: opacity .3s ease; min-height: 1.2em;
+
+  /* 中间：笔记卡片流 */
+  #notes {
+    position: fixed; inset: 0; bottom: 120px;
+    display: flex; flex-direction: column; align-items: center;
+    overflow-y: auto; padding: 48px 24px 24px;
+    scrollbar-width: none;
   }
-  #hint.on { opacity: 1; }
+  #notes::-webkit-scrollbar { display: none; }
+  #notes .col { width: min(52ch, 86vw); display: flex; flex-direction: column; gap: 18px; }
+  .note {
+    border-left: 2px solid #2E2E2E; padding-left: 12px;
+    animation: rise .25s ease;
+  }
+  .note .t { font-size: 14px; font-weight: 500; color: #CCC; letter-spacing: .01em; }
+  .note .c { font-size: 13px; color: #777; line-height: 1.55; margin-top: 3px; }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; } }
+
+  /* 底部：常态输入行 + 模式标签 */
   #kbd {
-    position: fixed; left: 0; right: 0; bottom: 56px;
+    position: fixed; left: 0; right: 0; bottom: 44px;
     display: flex; justify-content: center;
-    opacity: 0; pointer-events: none; transition: opacity .25s ease;
   }
-  #kbd.on { opacity: 1; pointer-events: auto; }
-  #kbd .row { display: flex; align-items: baseline; gap: 10px; width: min(60ch, 80vw); }
+  #kbd .row { display: flex; align-items: baseline; gap: 10px; width: min(52ch, 86vw); }
   #kbd .prompt { color: #666; font-size: 15px; user-select: none; }
   #kbd input {
     flex: 1; background: none; border: none; outline: none; padding: 0;
     color: #DDD; font-size: 15px; font-family: inherit; caret-color: #888;
   }
   #kbd input::placeholder { color: #3A3A3A; }
+  #modelabel {
+    font-size: 11px; color: #3F3F3F; letter-spacing: .08em;
+    user-select: none; transition: color .4s ease;
+  }
+  #modelabel.lit { color: #999; }
+
+  /* 右下：orb + 工具提示 */
+  #dock {
+    position: fixed; right: 32px; bottom: 32px;
+    display: flex; flex-direction: column; align-items: flex-end; gap: 14px;
+  }
+  #hint {
+    font-size: 12px; color: var(--hint); letter-spacing: .02em; text-align: right;
+    opacity: 0; transition: opacity .3s ease; min-height: 1.2em;
+  }
+  #hint.on { opacity: 1; }
 </style>
 <script type="importmap">
 {
@@ -64,9 +90,13 @@ function App() {
   const [sig, setSig] = useState({ state: 'idle', inputVolume: 0, outputVolume: 0 })
   const [hint, setHint] = useState('')
   const [kbd, setKbd] = useState(false)
+  const [lit, setLit] = useState(false)
+  const [notes, setNotes] = useState([])
   const wsRef = useRef(null)
   const hintTimer = useRef(null)
+  const litTimer = useRef(null)
   const inputRef = useRef(null)
+  const notesRef = useRef(null)
 
   useEffect(() => {
     let dead = false, retry
@@ -86,7 +116,13 @@ function App() {
           clearTimeout(hintTimer.current)
           hintTimer.current = setTimeout(() => setHint(''), 2000)
         }
-        else if (m.type === 'mode') setKbd(!m.mic)
+        else if (m.type === 'ui.note') setNotes(ns => [...ns, { title: m.title, content: m.content }])
+        else if (m.type === 'mode') {
+          setKbd(!m.mic)
+          setLit(true)
+          clearTimeout(litTimer.current)
+          litTimer.current = setTimeout(() => setLit(false), 1500)
+        }
       }
       ws.onclose = () => { if (!dead) retry = setTimeout(connect, 1500) }
     }
@@ -105,10 +141,15 @@ function App() {
     }
   }, [])
 
-  useEffect(() => { if (kbd) inputRef.current?.focus() }, [kbd])
+  // 新卡片滚到底部
+  useEffect(() => {
+    const el = notesRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [notes])
 
   const toggle = () => wsRef.current?.send(JSON.stringify({ type: 'mode.toggle' }))
   const submit = (e) => {
+    if (e.nativeEvent.isComposing) return  // 中文输入法组词中的 Enter 不发送
     if (e.key === 'Enter' && e.target.value.trim()) {
       wsRef.current?.send(JSON.stringify({ type: 'text', text: e.target.value.trim() }))
       e.target.value = ''
@@ -117,22 +158,33 @@ function App() {
 
   const state = ORB_STATES.includes(sig.state) ? sig.state : 'idle'
   return html`
-    <div id="stage">
+    <div id="notes" ref=${notesRef}>
+      <div class="col">
+        ${notes.map((n, i) => html`
+          <div class="note" key=${i}>
+            <div class="t">${n.title}</div>
+            <div class="c">${n.content}</div>
+          </div>
+        `)}
+      </div>
+    </div>
+    <div id="kbd">
+      <div class="row">
+        <span class="prompt">›</span>
+        <input ref=${inputRef} placeholder="说点什么…" onKeyDown=${submit} />
+        <span id="modelabel" class=${lit ? 'lit' : ''}>${kbd ? '键盘' : '语音'}</span>
+      </div>
+    </div>
+    <div id="dock">
+      <div id="hint" class=${hint ? 'on' : ''}>${hint || ' '}</div>
       <${Orb}
         signal=${{ state, inputVolume: sig.inputVolume, outputVolume: sig.outputVolume }}
         theme="radial"
-        size=${180}
+        size=${96}
         onStart=${toggle}
         onStop=${toggle}
         aria-label="语音助手"
       />
-      <div id="hint" class=${hint ? 'on' : ''}>${hint || ' '}</div>
-    </div>
-    <div id="kbd" class=${kbd ? 'on' : ''}>
-      <div class="row">
-        <span class="prompt">›</span>
-        <input ref=${inputRef} placeholder="说点什么…" onKeyDown=${submit} />
-      </div>
     </div>
   `
 }

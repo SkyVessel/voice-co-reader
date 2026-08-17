@@ -27,6 +27,9 @@ log = logging.getLogger("bridge")
 TOOLS_DIR = "src/tools"
 SKILLS_DIR = "src/skills"
 KEY_ENV = {"qwen": "DASHSCOPE_API_KEY", "openai": "OPENAI_API_KEY"}
+import re
+from datetime import datetime
+from pathlib import Path
 WS_HOST, WS_PORT = "127.0.0.1", 8765
 MODEL_TAGS = ["qwen plus", "qwen flash", "gpt 2.1", "gpt mini"]  # 与 MODELS 顺序一致
 
@@ -56,6 +59,19 @@ def tool_hint(name: str, arguments: str) -> str:
     if name == "show_note":
         return f"记下笔记 {str(args.get('title', ''))[:16]}".strip()
     return f"使用工具 {name}"
+
+
+def read_today_notes() -> list[dict]:
+    """读取当天落盘笔记（show_note 写的 - [HH:MM] **标题** 内容 格式），供新客户端回填。"""
+    path = Path("notes") / f"{datetime.now():%Y-%m-%d}.md"
+    if not path.is_file():
+        return []
+    notes = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^- \[(?P<ts>\d\d:\d\d)\] \*\*(?P<title>.+?)\*\* (?P<content>.*)$", line)
+        if m:
+            notes.append({"title": m["title"], "content": m["content"], "ts": 0})
+    return notes
 
 
 class Bridge:
@@ -196,6 +212,9 @@ class Bridge:
                 {"type": "mode", "mic": self.session.mic_enabled}, ensure_ascii=False))
             await self._send(ws, json.dumps(
                 {"type": "state", "state": self.session.state.value}, ensure_ascii=False))
+        # 历史笔记回填：刷新页面不丢当天的卡片
+        for note in read_today_notes():
+            await self._send(ws, json.dumps({"type": "ui.note", **note}, ensure_ascii=False))
         try:
             async for raw in ws:
                 try:
