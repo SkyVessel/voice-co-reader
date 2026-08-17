@@ -302,9 +302,14 @@ class VoiceSession:
             self.bus.publish(t, session=evt.get("session", {}))
 
     async def _levels(self):
-        """10Hz 输出双路电平，UI 律动用。"""
+        """10Hz 输出双路电平，UI 律动用；每秒顺带检测输出设备切换（主线程侧，安全）。"""
+        tick = 0
         while True:
             await asyncio.sleep(0.1)
+            tick += 1
+            if tick >= 10:
+                tick = 0
+                self.speaker.maybe_follow()
             self.bus.publish("levels",
                              mic=round(self.mic.level, 3) if self.mic else 0.0,
                              speaker=round(self.speaker.level, 3))

@@ -63,49 +63,63 @@ class SpeakerPlayback:
         self._q: queue.Queue[bytes | None] = queue.Queue()
         self.level = 0.0
         self._stream = sd.RawOutputStream(samplerate=SPEAKER_RATE, channels=1, dtype="int16")
-        self._device: int | None = None  # 当前流绑定的系统默认输出设备号
+        self._device: int | None = self._resolve_default()  # 绑定时解析一次默认输出设备号
+        self._want_rebuild = False  # 主线程发现设备切换后置真，播放线程空闲时重建
         self._thread = threading.Thread(target=self._run, daemon=True)
+
+    @staticmethod
+    def _resolve_default() -> int | None:
+        """解析当前系统默认输出设备号。⚠️ 只能在主/async 线程调——
+        PortAudio 设备查询在播放线程里可能因设备列表变动而卡死（实测踩过）。"""
+        try:
+            return sd.default.device[1]
+        except Exception:
+            return None
+
+    def maybe_follow(self):
+        """主线程侧检测设备切换（session._levels 每秒调用）。只置标志，不碰 PortAudio 流。"""
+        cur = self._resolve_default()
+        if cur is not None and self._device is not None and cur != self._device:
+            self._want_rebuild = True
 
     def _run(self):
         while True:
             try:
                 chunk = self._q.get(timeout=0.5)
             except queue.Empty:
-                self._follow_device()  # 空闲时检查系统默认输出是否变了
+                if self._want_rebuild:
+                    self._rebuild()
                 continue
             if chunk is None:  # 停止信号
                 break
             self.level = rms(chunk)
             try:
                 self._stream.write(chunk)
-            except Exception as e:  # 关闭竞态/设备抖动不致命
+            except Exception as e:  # 设备抖动只丢这块，绝不退出（线程死了=永久失声）
                 log.warning("playback write failed: %s", e)
-                break
+                continue
 
-    def _follow_device(self):
-        """插拔耳机后系统默认输出会变 → 重建流跟随（在播放线程内执行，无竞态）。"""
+    def _rebuild(self):
+        """重建流跟随系统默认输出（播放线程内执行，无竞态）。"""
+        self._want_rebuild = False
+        cur = self._resolve_default()
         try:
-            cur = sd.default.device[1]
+            old_name = sd.query_devices(self._device)["name"] if self._device is not None else "?"
+            new_name = sd.query_devices(cur)["name"] if cur is not None else "?"
         except Exception:
-            return
-        if self._device is None:
-            self._device = cur
-            return
-        if cur != self._device:
-            try:
-                old_name = sd.query_devices(self._device)["name"]
-                new_name = sd.query_devices(cur)["name"]
-            except Exception:
-                old_name, new_name = str(self._device), str(cur)
-            log.warning("输出设备切换: %s → %s", old_name, new_name)
-            try:
-                self._stream.stop()
-                self._stream.close()
-            except Exception:
-                pass
+            old_name, new_name = str(self._device), str(cur)
+        log.warning("输出设备切换: %s → %s", old_name, new_name)
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except Exception:
+            pass
+        try:
             self._stream = sd.RawOutputStream(samplerate=SPEAKER_RATE, channels=1, dtype="int16")
             self._stream.start()
             self._device = cur
+        except Exception as e:
+            log.warning("输出流重建失败: %s", e)
 
     def start(self):
         self._stream.start()
