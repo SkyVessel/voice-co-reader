@@ -253,7 +253,7 @@ class VoiceSession:
             #  全部推到 done 后写是唯一稳定顺序，对 Qwen 同样合法）
             name, args = evt["name"], evt.get("arguments", "{}")
             await self.hooks.emit("on_tool_call", name=name, arguments=args)
-            self.bus.publish("tool.call", name=name)
+            self.bus.publish("tool.call", name=name, arguments=args)
             result = await self.tools.dispatch(name, args)
             await self.hooks.emit("on_tool_result", name=name, result=result)
             self.bus.publish("tool.result", name=name, result=result)

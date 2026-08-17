@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>导读</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist@5/index.css">
+<style>
+  :root { --bg: #0A0A0A; --hint: #555; }
+  html, body { margin: 0; height: 100%; background: var(--bg); }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    font-family: "Geist", -apple-system, "PingFang SC", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  #stage { display: flex; flex-direction: column; align-items: center; gap: 28px; }
+  #hint {
+    font-size: 13px; color: var(--hint); letter-spacing: .02em;
+    opacity: 0; transition: opacity .3s ease; min-height: 1.2em;
+  }
+  #hint.on { opacity: 1; }
+  #kbd {
+    position: fixed; left: 0; right: 0; bottom: 56px;
+    display: flex; justify-content: center;
+    opacity: 0; pointer-events: none; transition: opacity .25s ease;
+  }
+  #kbd.on { opacity: 1; pointer-events: auto; }
+  #kbd .row { display: flex; align-items: baseline; gap: 10px; width: min(60ch, 80vw); }
+  #kbd .prompt { color: #666; font-size: 15px; user-select: none; }
+  #kbd input {
+    flex: 1; background: none; border: none; outline: none; padding: 0;
+    color: #DDD; font-size: 15px; font-family: inherit; caret-color: #888;
+  }
+  #kbd input::placeholder { color: #3A3A3A; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.3.1",
+    "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+    "react-dom": "https://esm.sh/react-dom@18.3.1",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+    "orb-ui": "https://esm.sh/orb-ui@0.7?external=react,react-dom",
+    "htm": "https://esm.sh/htm@3.1.1"
+  }
+}
+</script>
+</head>
+<body>
+<div id="root"></div>
+<script type="module">
+import React, { useState, useEffect, useRef } from 'react'
+import { createRoot } from 'react-dom/client'
+import { Orb } from 'orb-ui'
+import htm from 'htm'
+
+const html = htm.bind(React.createElement)
+const WS_URL = 'ws://127.0.0.1:8765'
+const ORB_STATES = ['idle', 'connecting', 'listening', 'thinking', 'speaking', 'error']
+
+function App() {
+  const [sig, setSig] = useState({ state: 'idle', inputVolume: 0, outputVolume: 0 })
+  const [hint, setHint] = useState('')
+  const [kbd, setKbd] = useState(false)
+  const wsRef = useRef(null)
+  const hintTimer = useRef(null)
+  const inputRef = useRef(null)
+
+  useEffect(() => {
+    let dead = false, retry
+    const connect = () => {
+      const ws = new WebSocket(WS_URL)
+      wsRef.current = ws
+      ws.onmessage = (e) => {
+        const m = JSON.parse(e.data)
+        if (m.type === 'state') setSig(s => ({ ...s, state: m.state }))
+        else if (m.type === 'levels') setSig(s => ({ ...s, inputVolume: m.mic, outputVolume: m.speaker }))
+        else if (m.type === 'tool.hint') { setHint(m.text); clearTimeout(hintTimer.current) }
+        else if (m.type === 'tool.done') {
+          clearTimeout(hintTimer.current)
+          hintTimer.current = setTimeout(() => setHint(''), 2000)
+        }
+        else if (m.type === 'mode') setKbd(!m.mic)
+      }
+      ws.onclose = () => { if (!dead) retry = setTimeout(connect, 1500) }
+    }
+    connect()
+    const onKey = (e) => {
+      if (e.key === 'Tab' && e.shiftKey) {
+        e.preventDefault()
+        wsRef.current?.send(JSON.stringify({ type: 'mode.toggle' }))
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      dead = true; clearTimeout(retry)
+      window.removeEventListener('keydown', onKey)
+      wsRef.current?.close()
+    }
+  }, [])
+
+  useEffect(() => { if (kbd) inputRef.current?.focus() }, [kbd])
+
+  const toggle = () => wsRef.current?.send(JSON.stringify({ type: 'mode.toggle' }))
+  const submit = (e) => {
+    if (e.key === 'Enter' && e.target.value.trim()) {
+      wsRef.current?.send(JSON.stringify({ type: 'text', text: e.target.value.trim() }))
+      e.target.value = ''
+    }
+  }
+
+  const state = ORB_STATES.includes(sig.state) ? sig.state : 'idle'
+  return html`
+    <div id="stage">
+      <${Orb}
+        signal=${{ state, inputVolume: sig.inputVolume, outputVolume: sig.outputVolume }}
+        theme="radial"
+        size=${180}
+        onStart=${toggle}
+        onStop=${toggle}
+        aria-label="语音助手"
+      />
+      <div id="hint" class=${hint ? 'on' : ''}>${hint || ' '}</div>
+    </div>
+    <div id="kbd" class=${kbd ? 'on' : ''}>
+      <div class="row">
+        <span class="prompt">›</span>
+        <input ref=${inputRef} placeholder="说点什么…" onKeyDown=${submit} />
+      </div>
+    </div>
+  `
+}
+
+createRoot(document.getElementById('root')).render(html`<${App} />`)
+</script>
+</body>
+</html>
