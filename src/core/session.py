@@ -141,13 +141,19 @@ class VoiceSession:
             return
         await self._uplink()
 
+    async def _uplink(self):
+        """麦克帧 → provider。单帧发送失败只丢帧不杀任务（断线期丢弃，重连后自动恢复）。
+        ⚠️ 本方法曾被锚点编辑误吞导致麦克风全哑——改动后请跑 scripts/smoke_tool.py 回归。"""
         while True:
             pcm = await self.mic.frames.get()
-            if self.mic_enabled:  # 键盘模式下丢弃麦克帧（AI 听不到你）
-                try:
-                    await self.provider.send_audio(pcm)
-                except (ConnectionError, OSError):
-                    pass  # 断线期丢帧，重连后自动恢复
+            if not self.mic_enabled:  # 键盘模式：丢弃麦克帧（AI 听不到你）
+                continue
+            try:
+                await self.provider.send_audio(pcm)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.debug("uplink 丢帧: %s", e)
 
     async def _downlink(self):
         try:
