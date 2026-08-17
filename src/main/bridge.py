@@ -21,6 +21,7 @@ from src.core.reload import ReloadManager
 from src.core.session import VoiceSession
 from src.core.skills import load_skills
 from src.core.tools import ToolContext, ToolRegistry, load_tools_from_dir
+from src.core.delegate import Delegate
 from src.main.cli import MODELS, VOICES, load_env
 
 log = logging.getLogger("bridge")
@@ -46,6 +47,12 @@ def tool_hint(name: str, arguments: str) -> str:
 
     if name == "web_search":
         return f"搜索 {str(args.get('query', ''))[:24]}".strip()
+    if name == "deep_think":
+        return "主力模型思考中"
+    if name == "request_note":
+        return f"撰写笔记 {str(args.get('topic', ''))[:18]}".strip()
+    if name == "show_note":
+        return f"记下笔记 {str(args.get('title', ''))[:18]}".strip()
     if name == "web_fetch":
         return "阅读网页"
     if name == "bash":
@@ -75,11 +82,12 @@ def read_today_notes() -> list[dict]:
 
 
 class Bridge:
-    def __init__(self, bus: EventBus, registry: ToolRegistry, hooks: Hooks):
+    def __init__(self, bus: EventBus, registry: ToolRegistry, hooks: Hooks, delegate: Delegate):
         self.bus = bus
         self.registry = registry
         self.hooks = hooks
         self.clients: set = set()
+        self.delegate = delegate
         self.cur = {
             "provider": os.environ.get("VOICE_PROVIDER", "qwen"),
             "model": os.environ.get("VOICE_MODEL", "") or None,
@@ -102,9 +110,11 @@ class Bridge:
             return None
         provider = create_provider(self.cur["provider"], key, self.cur["model"],
                                    ws_base=os.environ.get("OPENAI_WS_BASE", ""))
-        return VoiceSession(provider, self.bus, tools=self.registry, hooks=self.hooks,
-                            skills=load_skills(SKILLS_DIR),
-                            config={"voice": self.cur["voice"][self.cur["provider"]]})
+        s = VoiceSession(provider, self.bus, tools=self.registry, hooks=self.hooks,
+                         skills=load_skills(SKILLS_DIR),
+                         config={"voice": self.cur["voice"][self.cur["provider"]]})
+        self.delegate.attach(s)
+        return s
 
     async def start(self):
         self.session = self._make_session()
@@ -249,7 +259,7 @@ async def amain():
         return registry.names(), [s.name for s in skill_list], skill_list
 
     load_all()
-    bridge = Bridge(bus, registry, hooks)
+    bridge = Bridge(bus, registry, hooks, Delegate(bus))
     await bridge.start()
     if bridge.session is None:
         return

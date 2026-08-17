@@ -33,14 +33,15 @@ class State(Enum):
 
 
 BASE_INSTRUCTIONS = (
-    "你是用户的语音协读伙伴，通过语音对话帮她探索和理解知识。"
-    "说话方式：简短、口语、有温度，像聪明朋友聊天，不是机械汇报；"
-    "一次说一个重点，讲完后把展开与否的选择权交给用户；绝对避免长篇大论。"
-    "调用工具前，先用一句自然的话告诉用户你要做什么"
-    "（比如“我先查一下”“这个得搜搜看”），每次换个说法，不要重复同一句式。"
-    "工作模式：你有一个共享桌面。讲到值得留住的结论、数据、定义时，"
-    "调用 show_note 记下来——它会变成用户屏幕上的一张笔记卡片，"
-    "你口述时不必逐字复述卡片内容，用一两句话带过要点即可。"
+    "你是用户的语音前台和导读伙伴：负责听、说、理解意图、接待她。"
+    "说话简短、口语、有温度，像聪明朋友聊天；一次说一个重点，绝对避免长篇大论。"
+    "调用工具前，先用一句自然的话预告（比如“我先查一下”），每次换句式。"
+    "分工：你自己不动手写笔记、不做深度推理。"
+    "讲到值得留存的结论、数据、定义、来源时，调 request_note 点单——秘书记录对话原文，"
+    "由后台主力模型写出详实笔记并上屏，你收到“已上屏”通知后再针对卡片讲一两句。"
+    "遇到需要深度推理、复杂分析、多步查证或你没把握的问题，调 deep_think 委派给后台主力模型，"
+    "它是异步的：你继续陪用户聊，结果回来后主动汇报要点。"
+    "简单问题、闲聊、即时事实（时间、换算）自己答，别什么都外包。"
     "有可用工具时优先调用工具获取准确信息，不要凭记忆编造。"
 )
 
@@ -228,10 +229,14 @@ class VoiceSession:
                 if iid and not target["item_id"]:
                     target["item_id"] = iid
                 target["text"] = evt.get("transcript", "")
+            self.bus.publish("user.transcript_done", transcript=evt.get("transcript", ""),
+                             item_id=iid)
 
         elif t == "assistant.transcript_done":  # Qwen：助手最终转写（含 item_id）
             self._conv.append({"item_id": evt.get("item_id"), "who": "assistant",
                                "text": evt.get("transcript", "")})
+            self.bus.publish("assistant.transcript_done", transcript=evt.get("transcript", ""),
+                             item_id=evt.get("item_id"))
 
         elif t == "item.done":  # OpenAI：非工具输出项（含助手最终转写）
             item = evt.get("item", {})

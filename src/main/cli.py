@@ -23,6 +23,7 @@ from src.core.reload import ReloadManager
 from src.core.session import VoiceSession
 from src.core.skills import load_skills
 from src.core.tools import ToolContext, ToolRegistry, load_tools_from_dir
+from src.core.delegate import Delegate
 from src.core.tts import voice_preview
 
 STATE_ICON = {"idle": "⏸ ", "listening": "🎙 ", "thinking": "🤔", "speaking": "🔊"}
@@ -110,6 +111,7 @@ async def amain():
     bus.subscribe(render)
     hooks = Hooks()
     registry = ToolRegistry(ToolContext(bus))
+    delegate = Delegate(bus)  # 后台主力模型服务（deep_think / request_note 的落点）
 
     def load_all():
         registry.clear()
@@ -138,9 +140,11 @@ async def amain():
             return None
         provider = create_provider(cur["provider"], key, cur["model"],
                                    ws_base=os.environ.get("OPENAI_WS_BASE", ""))
-        return VoiceSession(provider, bus, tools=registry, hooks=hooks,
-                            skills=initial_skills,
-                            config={"voice": cur["voice"][cur["provider"]]})
+        s = VoiceSession(provider, bus, tools=registry, hooks=hooks,
+                         skills=initial_skills,
+                         config={"voice": cur["voice"][cur["provider"]]})
+        delegate.attach(s)
+        return s
 
     async def restart_session():
         """关闭旧会话并按当前 cur 配置重连（/model /voice 的落点）。"""
