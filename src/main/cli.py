@@ -86,6 +86,13 @@ def render(evt: Event):
         print(f"\n🔧 [调用工具: {d.get('name')}]", flush=True)
     elif t == "ui.note":
         print(f"\n📝 [笔记] {d['title']}: {d['content']}", flush=True)
+    elif t == "trimmed":
+        print(f"\n✂️  [主动裁剪] {d['count']} 项归档→{d['archive']}（模型侧删 {d['deleted']} 项）", flush=True)
+    elif t == "usage":
+        u = d.get("usage") or {}
+        inp = u.get("input_tokens") or u.get("prompt_tokens") or "?"
+        tot = u.get("total_tokens") or "?"
+        print(f"\n📊 [tokens] 输入 {inp} / 总计 {tot}", flush=True)
     elif t == "reloaded":
         print(f"\n♻️  [热重载] 工具: {d.get('tools') or '无'} | 技能: {d.get('skills') or '无'}", flush=True)
     elif t == "error":

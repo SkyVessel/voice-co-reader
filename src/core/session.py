@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime
 from enum import Enum
+from pathlib import Path
 
 from .audio import MicCapture, SpeakerPlayback
 from .events import EventBus
@@ -60,6 +62,9 @@ class VoiceSession:
         self._response_active = False          # response.created/done 之间为 True
         self.mic_enabled = True                # False = 键盘模式（丢弃麦克帧）
         self._closed = False                   # close() 后置真：禁止监督循环重连（防僵尸会话）
+        self._conv: list[dict] = []                  # 会话项流水 {item_id, who, text}（主动裁剪）
+        self._tool_result_text: dict[str, str] = {}  # call_id → 结果文本（item.created 回声时回填）
+        self._archive_notified = False               # 是否已告知模型“有归档文件可查”
 
     def _instructions(self) -> str:
         return BASE_INSTRUCTIONS + format_for_instructions(self.skills)
@@ -105,6 +110,9 @@ class VoiceSession:
             # 落点：连接已死。清理跨会话无效的状态
             self._pending_tool_results.clear()
             self._response_active = False
+            self._conv.clear()              # 重连 = 服务端上下文已丟，本地流水同步重置
+            self._tool_result_text.clear()
+            self._archive_notified = False
             self._set_state(State.IDLE)
             self.bus.publish("error", error={"type": "reconnecting",
                                              "message": f"{delay}s 后自动重连…"})
@@ -203,6 +211,42 @@ class VoiceSession:
         elif t == "assistant.transcript_delta":
             self.bus.publish("assistant.transcript_delta", delta=evt.get("delta", ""))
 
+        elif t == "user.committed":
+            self._conv.append({"item_id": evt.get("item_id"), "who": "user", "text": ""})
+
+        elif t == "user.transcript_done":
+            iid = evt.get("item_id")
+            target = next((x for x in reversed(self._conv)
+                           if x["who"] == "user" and (x["item_id"] == iid or not x["text"])), None)
+            if target:
+                if iid and not target["item_id"]:
+                    target["item_id"] = iid
+                target["text"] = evt.get("transcript", "")
+
+        elif t == "assistant.transcript_done":  # Qwen：助手最终转写（含 item_id）
+            self._conv.append({"item_id": evt.get("item_id"), "who": "assistant",
+                               "text": evt.get("transcript", "")})
+
+        elif t == "item.done":  # OpenAI：非工具输出项（含助手最终转写）
+            item = evt.get("item", {})
+            text = "".join(c.get("transcript") or c.get("text") or ""
+                           for c in (item.get("content") or []))
+            self._conv.append({"item_id": item.get("id"),
+                               "who": item.get("role", "assistant"), "text": text})
+
+        elif t == "item.created":  # 客户端创建项的回声（注入文本 / 工具结果）
+            item = evt.get("item", {})
+            it_type = item.get("type")
+            if it_type == "function_call_output":
+                text = self._tool_result_text.pop(item.get("call_id"), "")
+                self._conv.append({"item_id": item.get("id"), "who": "tool",
+                                   "text": f"工具结果: {text[:300]}"})
+            elif it_type == "message":
+                text = "".join(c.get("text") or "" for c in (item.get("content") or []))
+                if not any(x["item_id"] == item.get("id") for x in self._conv):
+                    self._conv.append({"item_id": item.get("id"),
+                                       "who": item.get("role", "user"), "text": text})
+
         elif t == "tool.call":
             # Function Calling：执行 → 结果暂存 → 等 response.done 后统一写回+触发二轮
             # （实测：OpenAI 经典 API 经中转网关时，响应进行中写 item 会被静默吞掉，
@@ -214,6 +258,8 @@ class VoiceSession:
             await self.hooks.emit("on_tool_result", name=name, result=result)
             self.bus.publish("tool.result", name=name, result=result)
             self._pending_tool_results.append((evt["call_id"], result))
+            self._conv.append({"item_id": evt.get("item_id"), "who": "tool",
+                               "text": f"调用 {name}: {args[:200]}"})
 
         elif t == "response.created":
             self._response_active = True
@@ -223,14 +269,23 @@ class VoiceSession:
             self._response_active = False
             status = evt.get("status")
             self.bus.publish("response.done", status=status, reason=evt.get("reason"))
+            if evt.get("usage"):
+                self.bus.publish("usage", usage=evt["usage"])
             await self.hooks.emit("on_turn_end", status=status)
             self._set_state(State.IDLE)
             if self._pending_tool_results:
                 pending, self._pending_tool_results = self._pending_tool_results, []
                 asyncio.create_task(self._flush_tool_results(pending))
+            elif status == "completed":
+                await self._maybe_trim()
 
         elif t == "error":
-            self.bus.publish("error", error=evt.get("error"))
+            err = evt.get("error")
+            # 裁剪删除的良性报错（级联删除：删用户项时服务端已连带删了响应项）不扰民
+            if isinstance(err, dict) and err.get("param") == "conversation.item.delete":
+                log.info("裁剪删除被服务端跳过（已不存在）: %s", err.get("message"))
+            else:
+                self.bus.publish("error", error=err)
 
         elif t in ("session.created", "session.updated"):
             self.bus.publish(t, session=evt.get("session", {}))
@@ -249,6 +304,7 @@ class VoiceSession:
         try:
             for call_id, result in pending:
                 print(f"[flush] 写回 {call_id[-6:]} ({len(result)} 字符)", flush=True)
+                self._tool_result_text[call_id] = result
                 await self.provider.write_tool_result(call_id, result)
             for attempt in range(3):
                 await self.provider.create_response()
@@ -261,6 +317,48 @@ class VoiceSession:
         except Exception as e:
             # 连接已死（如服务器内容审查掐线）：不再往死 socket 上写，交给重连循环
             self.bus.publish("error", error={"type": "tool_writeback_failed", "message": str(e)})
+
+    async def _maybe_trim(self):
+        """主动裁剪（pi compaction 的语音版）：历史超阈值 → 转写落盘 notes/ + 删模型侧 item。
+        音频 token 12.5 tok/s 且重复计费，不裁剪 ≈ 只能聊 10 分钟。"""
+        max_items = int(self.extra_config.get("max_history_items", 30))
+        if len(self._conv) <= max_items:
+            return
+        cut = len(self._conv) - max_items
+        while cut < len(self._conv) and self._conv[cut]["who"] == "tool":
+            cut += 1  # 切口前移到非 tool 项，避免切断 调用/结果 对
+        old, self._conv = self._conv[:cut], self._conv[cut:]
+        # 系统提示项（归档通知）永久钉住：不参与删除与归档
+        pinned = [x for x in old if x["who"] == "system"]
+        old = [x for x in old if x["who"] != "system"]
+        self._conv = pinned + self._conv
+        if not old:
+            return
+        archive_dir = Path(self.extra_config.get("archive_dir", "notes"))
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        path = archive_dir / f"session-{datetime.now():%Y%m%d}.md"
+        with path.open("a", encoding="utf-8") as f:
+            for it in old:
+                if it["text"]:
+                    f.write(f"- [{datetime.now():%H:%M}] **{it['who']}** {it['text']}\n")
+        deleted = 0
+        for it in old:
+            if it.get("item_id"):
+                try:
+                    await self.provider.delete_item(it["item_id"])
+                    deleted += 1
+                except Exception as e:
+                    log.warning("delete_item 失败（裁剪中止，下轮重试）: %s", e)
+                    break
+        if not self._archive_notified:
+            self._archive_notified = True
+            try:
+                await self.provider.inject_text(
+                    f"[系统提示] 早期对话已归档到文件 {path}，用户问起时可用 read_file 工具查阅。",
+                    role="system")
+            except Exception:
+                pass
+        self.bus.publish("trimmed", count=len(old), deleted=deleted, archive=str(path))
     async def close(self):
         self._closed = True  # 先落闸：即使 cancel 竞态漏送，监督循环也不会重连
         if self.mic:

@@ -28,6 +28,7 @@ _EVENT_MAP = {
     "input_audio_buffer.speech_started": "user.speech_started",
     "input_audio_buffer.speech_stopped": "user.speech_stopped",
     "input_audio_buffer.committed": "user.committed",
+    "conversation.item.created": "item.created",
     "conversation.item.input_audio_transcription.delta": "user.transcript_delta",
     "conversation.item.input_audio_transcription.completed": "user.transcript_done",
     "response.created": "response.created",
@@ -55,6 +56,9 @@ class RealtimeProvider(ABC):
 
     @abstractmethod
     async def write_tool_result(self, call_id: str, output: str) -> None: ...
+
+    @abstractmethod
+    async def delete_item(self, item_id: str) -> None: ...  # 主动裁剪：删历史 item
 
     @abstractmethod
     async def events(self) -> AsyncIterator[dict[str, Any]]:
@@ -102,6 +106,9 @@ class QwenRealtimeProvider(RealtimeProvider):
             "item": {"type": "function_call_output", "call_id": call_id, "output": output},
         })
 
+    async def delete_item(self, item_id: str) -> None:
+        await self._send({"type": "conversation.item.delete", "item_id": item_id})
+
     async def inject_text(self, text: str, role: str = "user") -> None:
         """注入文本消息（文本降级模式 / 冒烟测试用）。"""
         await self._send({
@@ -130,13 +137,23 @@ class QwenRealtimeProvider(RealtimeProvider):
                 evt["stash"] = msg.get("stash", "")
             elif qtype == "conversation.item.input_audio_transcription.completed":
                 evt["transcript"] = msg.get("transcript", "")
+                evt["item_id"] = msg.get("item_id")
+            elif qtype == "response.audio_transcript.done":
+                evt["transcript"] = msg.get("transcript", "")
+                evt["item_id"] = msg.get("item_id")
             elif qtype == "response.function_call_arguments.done":
                 evt.update(call_id=msg.get("call_id"), name=msg.get("name"),
-                           arguments=msg.get("arguments", "{}"))
+                           arguments=msg.get("arguments", "{}"),
+                           item_id=msg.get("item_id"))
+            elif qtype == "input_audio_buffer.committed":
+                evt["item_id"] = msg.get("item_id")
+            elif qtype == "conversation.item.created":
+                evt["item"] = msg.get("item", {})
             elif qtype == "response.done":
                 resp = msg.get("response", {})
                 evt["status"] = resp.get("status")
                 evt["reason"] = (resp.get("status_details") or {}).get("reason")
+                evt["usage"] = resp.get("usage")  # token 用量（裁剪效果监控 + 商业化计量）
             elif qtype == "error":
                 evt["error"] = msg.get("error", {})
             elif qtype in ("session.created", "session.updated"):
@@ -160,6 +177,8 @@ _OA_EVENT_MAP = {
     "session.updated": "session.updated",
     "input_audio_buffer.speech_started": "user.speech_started",
     "input_audio_buffer.speech_stopped": "user.speech_stopped",
+    "input_audio_buffer.committed": "user.committed",
+    "conversation.item.created": "item.created",
     "conversation.item.input_audio_transcription.delta": "user.transcript_delta",
     "conversation.item.input_audio_transcription.completed": "user.transcript_done",
     "response.created": "response.created",
@@ -254,6 +273,9 @@ class OpenAIRealtimeProvider(RealtimeProvider):
             "item": {"type": "function_call_output", "call_id": call_id, "output": output},
         })
 
+    async def delete_item(self, item_id: str) -> None:
+        await self._send({"type": "conversation.item.delete", "item_id": item_id})
+
     async def inject_text(self, text: str, role: str = "user") -> None:
         await self._send({
             "type": "conversation.item.create",
@@ -283,16 +305,21 @@ class OpenAIRealtimeProvider(RealtimeProvider):
                     seen_tool_calls.add(cid)
                     yield {"type": "tool.call", "raw_type": otype,
                            "call_id": cid, "name": msg.get("name"),
-                           "arguments": msg.get("arguments", "{}")}
+                           "arguments": msg.get("arguments", "{}"),
+                           "item_id": msg.get("item_id")}
                 continue
             if otype == "response.output_item.done":
                 item = msg.get("item", {})
-                cid = item.get("call_id")
-                if item.get("type") == "function_call" and cid not in seen_tool_calls:
-                    seen_tool_calls.add(cid)
-                    yield {"type": "tool.call", "raw_type": otype,
-                           "call_id": cid, "name": item.get("name"),
-                           "arguments": item.get("arguments", "{}")}
+                if item.get("type") == "function_call":
+                    cid = item.get("call_id")
+                    if cid not in seen_tool_calls:
+                        seen_tool_calls.add(cid)
+                        yield {"type": "tool.call", "raw_type": otype,
+                               "call_id": cid, "name": item.get("name"),
+                               "arguments": item.get("arguments", "{}"),
+                               "item_id": item.get("id")}
+                else:
+                    yield {"type": "item.done", "raw_type": otype, "item": item}
                 continue
             mapped = _OA_EVENT_MAP.get(otype)
             if mapped is None:
@@ -308,10 +335,16 @@ class OpenAIRealtimeProvider(RealtimeProvider):
                 evt["stash"] = ""
             elif otype == "conversation.item.input_audio_transcription.completed":
                 evt["transcript"] = msg.get("transcript", "")
+                evt["item_id"] = msg.get("item_id")
+            elif otype == "input_audio_buffer.committed":
+                evt["item_id"] = msg.get("item_id")
+            elif otype == "conversation.item.created":
+                evt["item"] = msg.get("item", {})
             elif otype == "response.done":
                 resp = msg.get("response", {})
                 evt["status"] = resp.get("status")
                 evt["reason"] = (resp.get("status_details") or {}).get("reason")
+                evt["usage"] = resp.get("usage")
             elif otype == "error":
                 evt["error"] = msg.get("error", {})
             elif otype in ("session.created", "session.updated"):
