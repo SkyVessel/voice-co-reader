@@ -73,6 +73,7 @@ class VoiceSession:
         self._response_active = False          # response.created/done 之间为 True
         self.mic_enabled = True                # False = 键盘模式（丢弃麦克帧）
         self._closed = False                   # close() 后置真：禁止监督循环重连（防僵尸会话）
+        self._last_audio_at = 0.0                    # 最后一帧播放音频的时刻（半双工用）
         self._conv: list[dict] = []                  # 会话项流水 {item_id, who, text}（主动裁剪）
         self._tool_result_text: dict[str, str] = {}  # call_id → 结果文本（item.created 回声时回填）
         self._archive_notified = False               # 是否已告知模型“有归档文件可查”
@@ -162,10 +163,15 @@ class VoiceSession:
 
     async def _uplink(self):
         """麦克帧 → provider。单帧发送失败只丢帧不杀任务（断线期丢弃，重连后自动恢复）。
+        半双工：AI 说话期间（含 0.4s 尾音）丢麦克帧——否则扬声器回授会被 VAD 当成用户说话，
+        AI 听到自己无限自聊（实测实锤）。代价：说话期间无语音打断（用 orb/打字打断）。
         ⚠️ 本方法曾被锚点编辑误吞导致麦克风全哑——改动后请跑 scripts/smoke_tool.py 回归。"""
         while True:
             pcm = await self.mic.frames.get()
             if not self.mic_enabled:  # 键盘模式：丢弃麦克帧（AI 听不到你）
+                continue
+            if (self.state is State.SPEAKING
+                    or time.time() - self._last_audio_at < 0.4):  # 尾音窗口
                 continue
             try:
                 await self.provider.send_audio(pcm)
@@ -211,6 +217,8 @@ class VoiceSession:
         elif t == "assistant.audio_delta":
             pcm = evt.get("pcm", b"")
             self.speaker.enqueue(pcm)
+            if pcm:
+                self._last_audio_at = time.time()  # 半双工尾音窗口用
             if not self._first_audio:
                 self._first_audio = True
                 self._set_state(State.SPEAKING)
