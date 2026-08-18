@@ -16,8 +16,9 @@ NOTES_DIR = Path("notes")  # 项目内 notes/（裁剪归档也在这里）
 def register(registry, ctx):
     @registry.register(
         "show_note",
-        "当你讲到一个值得用户记住的重点（结论、定义、关键数据、来源链接）时调用，"
-        "把它作为笔记展示并保存给用户。content 要精炼，一两句话以内；有来源就附上 URL。",
+        "仅限记录你刚刚亲口对用户说过的一句话结论（速记用途）。"
+        "没口述过的内容、需要详细整理的内容，一律改用 request_note 让秘书写。"
+        "content 要精炼，一两句话以内；有来源就附上 URL。",
         parameters={
             "type": "object",
             "properties": {

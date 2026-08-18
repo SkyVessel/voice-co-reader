@@ -23,6 +23,8 @@ log = logging.getLogger("delegate")
 
 THINK_PROMPT = """{system}
 
+【当前时间】{now}
+
 【最近的对话上下文】
 {context}
 
@@ -77,6 +79,7 @@ class Delegate:
         try:
             prompt = THINK_PROMPT.format(
                 system=SYSTEM,
+                now=__import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M"),
                 context=self.secretary.context_text(16),
                 question=question,
                 extra=f"\n【前台补充背景】{context}" if context else "")
